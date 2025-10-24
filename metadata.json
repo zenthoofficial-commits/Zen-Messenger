@@ -1,0 +1,8 @@
+{
+  "name": "ZenChat",
+  "description": "A warm, modern, Telegram-style private messenger app with a focus on a smooth, highly polished Chat Box experience and user privacy.",
+  "requestFramePermissions": [
+    "microphone",
+    "camera"
+  ]
+}

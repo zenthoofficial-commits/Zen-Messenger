@@ -147,7 +147,7 @@ const ProfileScreen: React.FC<ProfileScreenProps> = ({ currentUser, onBack, onLo
             <LogOut size={20} />
             <span>Logout</span>
         </button>
-        <p className="text-sm text-text-primary/50 dark:text-gray-500">ZenChat v1.0.0</p>
+        <p className="text-sm text-text-primary/50 dark:text-gray-500">ZenChat v1.9.0</p>
         <p className="text-xs text-text-primary/40 dark:text-gray-600">Secure. Serene. Seamless.</p>
       </div>
     </div>

@@ -1,5 +1,5 @@
 import firebase from 'firebase/compat/app';
-type Timestamp = firebase.firestore.Timestamp;
+type Timestamp = number; // RTDB uses Unix timestamps (milliseconds)
 
 export interface UserProfileData {
   name: string;
@@ -8,7 +8,7 @@ export interface UserProfileData {
   gender: 'Male' | 'Female' | 'Non-binary' | 'Prefer not to say' | string;
   relationshipStatus: 'Single' | 'In a relationship' | 'Married' | "It's complicated" | 'Prefer not to say';
   avatarUrl?: string;
-  blockedUsers?: string[];
+  blockedUsers?: { [uid: string]: boolean };
   nicknames?: { [uid: string]: string }; // Map of friend UID to custom nickname
   accentColor?: string;
   chatBackgroundImageUrl?: string;
@@ -34,15 +34,15 @@ export interface Presence {
 
 
 export interface ReactionMap {
-  [emoji: string]: string[]; // Array of UIDs who reacted
+  [emoji: string]: { [uid: string]: boolean }; // Object of UIDs who reacted
 }
 
 export interface Message {
   id: string;
   text: string;
-  timestamp: Timestamp | any; // Allow for serverTimestamp()
+  timestamp: Timestamp;
   senderId: string;
-  readBy: string[];
+  readBy: { [uid: string]: boolean };
   isEdited?: boolean;
   reactions?: ReactionMap;
   replyTo?: {
@@ -52,7 +52,8 @@ export interface Message {
   };
   mediaType?: 'audio' | 'image' | 'video';
   mediaUrl?: string;
-  deletedFor?: string[]; // UIDs of users who have deleted this message for themselves
+  deletedFor?: { [uid: string]: boolean }; // UIDs of users who have deleted this message for themselves
+  isSystemMessage?: boolean;
 }
 
 export interface Notification {
@@ -70,12 +71,13 @@ export interface Notification {
 
 export interface Chat {
   id:string;
-  participants: string[];
-  createdAt?: Timestamp | any;
+  participants: { [uid: string]: boolean };
+  member_count?: number;
+  createdAt?: Timestamp;
   lastMessage?: Message;
   unreadCount: { [key: string]: number };
   typing: { [key: string]: boolean };
-  pinnedBy?: string[];
+  pinnedBy?: { [userId: string]: boolean };
   hiddenBy?: { [userId: string]: boolean };
   pinnedMessageId?: string;
 }
@@ -87,7 +89,8 @@ export interface ChatWithDetails extends Chat {
 
 export interface Call {
   id: string;
-  participants: string[];
+  participants: { [uid: string]: boolean };
+  member_count?: number;
   callerId: string;
   callerName: string;
   callerAvatar?: string;
@@ -96,5 +99,10 @@ export interface Call {
   calleeAvatar?: string;
   type: 'audio' | 'video';
   status: 'ringing' | 'connected' | 'ended' | 'declined' | 'missed';
-  createdAt: Timestamp | any;
+  createdAt: Timestamp;
+  offer?: RTCSessionDescriptionInit;
+  answer?: RTCSessionDescriptionInit;
+  callerCandidates?: any;
+  calleeCandidates?: any;
+  chatId: string;
 }

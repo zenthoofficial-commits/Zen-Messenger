@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, Search, MessageSquare } from 'lucide-react';
+import { X, Search, MessageSquare, Loader2 } from 'lucide-react';
 import { db } from '../firebase';
 import { User } from '../types';
 import Avatar from './Avatar';
@@ -9,9 +9,10 @@ interface SearchUserModalProps {
   onClose: () => void;
   onSelectUser: (user: User) => void;
   friendUids: string[];
+  isCreatingChatWith?: string | null;
 }
 
-const SearchUserModal: React.FC<SearchUserModalProps> = ({ currentUser, onClose, onSelectUser, friendUids }) => {
+const SearchUserModal: React.FC<SearchUserModalProps> = ({ currentUser, onClose, onSelectUser, friendUids, isCreatingChatWith }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [results, setResults] = useState<User[]>([]);
   const [loading, setLoading] = useState(false);
@@ -27,35 +28,48 @@ const SearchUserModal: React.FC<SearchUserModalProps> = ({ currentUser, onClose,
     setLoading(true);
     setSearched(true);
     
-    const usersRef = db.collection('users');
+    const usersRef = db.ref('users');
     const foundUsers: User[] = [];
     const foundUids = new Set<string>();
 
-    try {
-        const userDoc = await usersRef.doc(query).get();
-        if (userDoc.exists && userDoc.id !== currentUser.uid) {
-            const userData = { uid: userDoc.id, ...userDoc.data() } as User;
-            foundUsers.push(userData);
-            foundUids.add(userData.uid);
+    // Check if the query could be a valid UID (no illegal characters)
+    const isPotentiallyValidUid = !/[.#$[\]]/.test(query);
+
+    if (isPotentiallyValidUid) {
+        try {
+            const userSnap = await usersRef.child(query).once('value');
+            if (userSnap.exists() && userSnap.key !== currentUser.uid) {
+                const userData = { uid: userSnap.key, ...userSnap.val() } as User;
+                foundUsers.push(userData);
+                foundUids.add(userData.uid);
+            }
+        } catch(e) {
+            // This will now only catch other errors, not invalid path errors.
+            console.error("RTDB Error: Failed to search user by ID.", e);
         }
-    } catch(e) {
-        // Not a valid UID, or other error, ignore and proceed to name search.
     }
 
-    const lowerCaseQuery = query.toLowerCase();
-    const nameQuery = usersRef
-        .where('name_lowercase', '>=', lowerCaseQuery)
-        .where('name_lowercase', '<=', lowerCaseQuery + '\uf8ff')
-        .limit(10);
+    try {
+        const lowerCaseQuery = query.toLowerCase();
+        const nameQuery = usersRef
+            .orderByChild('name_lowercase')
+            .startAt(lowerCaseQuery)
+            .endAt(lowerCaseQuery + '\uf8ff')
+            .limitToFirst(10);
 
-    const querySnapshot = await nameQuery.get();
-    querySnapshot.forEach((doc) => {
-        if (doc.id !== currentUser.uid && !foundUids.has(doc.id)) {
-            const userData = { uid: doc.id, ...doc.data() } as User;
-            foundUsers.push(userData);
-            foundUids.add(userData.uid);
+        const querySnapshot = await nameQuery.once('value');
+        if (querySnapshot.exists()){
+            querySnapshot.forEach((doc) => {
+                if (doc.key !== currentUser.uid && !foundUids.has(doc.key!)) {
+                    const userData = { uid: doc.key, ...doc.val() } as User;
+                    foundUsers.push(userData);
+                    foundUids.add(userData.uid);
+                }
+            });
         }
-    });
+    } catch (e) {
+        console.error("RTDB Error: Failed to search users by name.", e);
+    }
     
     setResults(foundUsers);
     setLoading(false);
@@ -106,6 +120,7 @@ const SearchUserModal: React.FC<SearchUserModalProps> = ({ currentUser, onClose,
             <div className="space-y-2">
                 {results.map(user => {
                     const isFriend = friendUids.includes(user.uid);
+                    const isCreating = isCreatingChatWith === user.uid;
                     return (
                         <div key={user.uid} className="flex items-center justify-between p-2 rounded-lg hover:bg-base-tan/50 dark:hover:bg-gray-700/50">
                             <div className="flex items-center gap-3">
@@ -119,9 +134,10 @@ const SearchUserModal: React.FC<SearchUserModalProps> = ({ currentUser, onClose,
                             </div>
                             <button 
                                 onClick={() => onSelectUser(user)}
-                                className="p-2 bg-accent-green text-white rounded-full hover:bg-accent-green/90 transition-transform transform active:scale-90"
+                                disabled={isCreating}
+                                className="w-10 h-10 flex items-center justify-center flex-shrink-0 bg-accent-green text-white rounded-full hover:bg-accent-green/90 transition-transform transform active:scale-90 disabled:bg-accent-green/50"
                             >
-                                <MessageSquare size={20} />
+                                {isCreating ? <Loader2 size={20} className="animate-spin" /> : <MessageSquare size={20} />}
                             </button>
                         </div>
                     )

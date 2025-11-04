@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { User } from '../types';
 import { db } from '../firebase';
-import firebase from 'firebase/compat/app';
 import { ArrowLeft, UserX } from 'lucide-react';
 import Avatar from '../components/Avatar';
 
@@ -15,10 +14,10 @@ const BlockedUsersScreen: React.FC<BlockedUsersScreenProps> = ({ currentUser, on
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const userRef = db.collection('users').doc(currentUser.uid);
-    const unsubscribe = userRef.onSnapshot(async (doc) => {
-        const userData = doc.data() as User;
-        const blockedIds = userData.blockedUsers || [];
+    const userRef = db.ref(`users/${currentUser.uid}`);
+    const listener = userRef.on('value', async (snapshot) => {
+        const userData = snapshot.val() as User;
+        const blockedIds = userData.blockedUsers ? Object.keys(userData.blockedUsers) : [];
         setLoading(true);
 
         if (blockedIds.length === 0) {
@@ -28,26 +27,30 @@ const BlockedUsersScreen: React.FC<BlockedUsersScreenProps> = ({ currentUser, on
         }
 
         try {
-            const usersRef = db.collection('users');
-            const userDocs = await usersRef.where(firebase.firestore.FieldPath.documentId(), 'in', blockedIds).get();
-            const users = userDocs.docs.map(doc => ({ uid: doc.id, ...doc.data() } as User));
+            const userPromises = blockedIds.map(id => 
+                db.ref(`users/${id}`).once('value').then(snap => 
+                    snap.exists() ? { uid: snap.key, ...snap.val() } as User : null
+                )
+            );
+            const users = (await Promise.all(userPromises)).filter(Boolean) as User[];
             setBlockedUsers(users);
         } catch (error) {
-            console.error("Error fetching blocked users:", error);
+            console.error("RTDB Error: Failed to fetch blocked users:", error);
         } finally {
             setLoading(false);
         }
+    }, error => {
+        console.error("RTDB Error: Failed to listen for current user's blocked list.", error);
+        setLoading(false);
     });
 
-    return () => unsubscribe();
+    return () => userRef.off('value', listener);
   }, [currentUser.uid]);
 
   const handleUnblock = async (userIdToUnblock: string) => {
     if (window.confirm("Are you sure you want to unblock this user?")) {
         try {
-          await db.collection('users').doc(currentUser.uid).update({
-            blockedUsers: firebase.firestore.FieldValue.arrayRemove(userIdToUnblock)
-          });
+          await db.ref(`users/${currentUser.uid}/blockedUsers/${userIdToUnblock}`).remove();
         } catch (error) {
           console.error("Error unblocking user:", error);
           alert("Failed to unblock user. Please try again.");

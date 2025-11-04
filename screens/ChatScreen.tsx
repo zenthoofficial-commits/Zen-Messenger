@@ -6,20 +6,22 @@ import InputBar from '../components/InputBar';
 import ReplyPreview from '../components/ReplyPreview';
 import ContextMenu from '../components/ContextMenu';
 import MediaViewer from '../components/MediaViewer';
+import PermissionModal from '../components/PermissionModal';
 import { ArrowLeft, Phone, MoreVertical, Video, Send, X, Shield, Pin, Copy, Trash, Edit, Languages, Search, Slash, CheckSquare, Square, Loader2 } from 'lucide-react';
 import { db, storage } from '../firebase';
 import firebase from 'firebase/compat/app';
-import 'firebase/compat/firestore';
+import 'firebase/compat/database';
 import 'firebase/compat/storage';
 import { compressImage } from '../utils/media';
 import { useDebouncedCallback } from 'use-debounce';
 import { motion, AnimatePresence } from 'framer-motion';
+import { translateText } from '../utils/gemini';
 
 interface ChatScreenProps {
   chat: ChatWithDetails;
   onBack: () => void;
   currentUser: User;
-  onStartCall: (type: 'audio' | 'video', user: User) => void;
+  onStartCall: (type: 'audio' | 'video', user: User, chatId: string) => void;
   onViewProfile: () => void;
   userCache: { [uid: string]: User };
   setUserCache: React.Dispatch<React.SetStateAction<{ [uid: string]: User }>>;
@@ -48,7 +50,6 @@ const playSound = (type: 'incoming' | 'outgoing') => {
     oscillator.connect(gainNode);
     gainNode.connect(audioContext.destination);
 
-    // Use a softer volume and sine wave for a more pleasant sound
     gainNode.gain.setValueAtTime(0, audioContext.currentTime);
     gainNode.gain.linearRampToValueAtTime(0.5, audioContext.currentTime + 0.01);
     oscillator.type = 'sine';
@@ -59,7 +60,6 @@ const playSound = (type: 'incoming' | 'outgoing') => {
         oscillator.frequency.value = 659; // E5 note
     }
 
-    // Shorter, softer sound
     oscillator.start(audioContext.currentTime);
     gainNode.gain.exponentialRampToValueAtTime(0.00001, audioContext.currentTime + 0.15);
     oscillator.stop(audioContext.currentTime + 0.15);
@@ -81,85 +81,111 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ chat, onBack, currentUser, onSt
   const [viewingMedia, setViewingMedia] = useState<Message | null>(null);
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedMessages, setSelectedMessages] = useState<string[]>([]);
-  const [isUploadingMedia, setIsUploadingMedia] = useState(false);
+  const [uploadState, setUploadState] = useState<{ progress: number; fileName: string; } | null>(null);
+  const [translatedMessages, setTranslatedMessages] = useState<Record<string, {text: string, isLoading: boolean}>>({});
+  const [isPermissionModalOpen, setIsPermissionModalOpen] = useState(false);
+  const [permissionError, setPermissionError] = useState<{name: 'geolocation', feature: string} | null>(null);
+
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
-  const chatMessagesRef = db.collection('chats').doc(chat.id).collection('messages');
-  const chatRef = db.collection('chats').doc(chat.id);
+  const chatMessagesRef = db.ref(`messages/${chat.id}`);
+  const chatRef = db.ref(`chats/${chat.id}`);
   
   useEffect(() => {
-    const userRef = db.collection('users').doc(chat.otherParticipant.uid);
-    const unsubscribe = userRef.onSnapshot(doc => {
-        if (doc.exists) {
-            setRealtimeOtherParticipant({ uid: doc.id, ...doc.data() } as User);
+    const userRef = db.ref(`users/${chat.otherParticipant.uid}`);
+    const listener = userRef.on('value', snapshot => {
+        if (snapshot.exists()) {
+            setRealtimeOtherParticipant({ uid: snapshot.key, ...snapshot.val() } as User);
         }
-    });
-    return () => unsubscribe();
+    }, error => console.error("RTDB Error: Failed to listen for other participant's profile.", error));
+    return () => userRef.off('value', listener);
   }, [chat.otherParticipant.uid]);
 
   useEffect(() => {
     if(!isChatSearchVisible && !selectionMode) { 
         messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
     }
-  }, [messages, isChatSearchVisible, selectionMode]);
+  }, [messages.length, isChatSearchVisible, selectionMode]);
   
-  // Messages listener
+  // Messages listener - Optimized for performance
   useEffect(() => {
-    const q = chatMessagesRef.orderBy('timestamp', 'asc');
-    const unsubscribe = q.onSnapshot((querySnapshot) => {
-        querySnapshot.docChanges().forEach(change => {
-            if (change.type === "added") {
-                const newMessage = { id: change.doc.id, ...change.doc.data() } as Message;
-                if (newMessage.senderId === realtimeOtherParticipant.uid && newMessage.timestamp) {
-                    const messageTime = newMessage.timestamp.toDate();
-                    if ((new Date().getTime() - messageTime.getTime()) < 5000) { 
-                         playSound('incoming');
-                    }
-                }
-            }
-        });
+    const q = chatMessagesRef.orderByChild('timestamp');
 
-        const msgs = querySnapshot.docs
-            .map(doc => ({ id: doc.id, ...doc.data() } as Message))
-            .filter(msg => !msg.deletedFor || !msg.deletedFor.includes(currentUser.uid));
-        setMessages(msgs);
-    });
-    return () => unsubscribe();
-  }, [chat.id, realtimeOtherParticipant.uid, currentUser.uid]);
+    const handleChildAdded = (snapshot: firebase.database.DataSnapshot) => {
+        const newMessage = { id: snapshot.key, ...snapshot.val() } as Message;
+        if (!newMessage.deletedFor?.[currentUser.uid]) {
+            setMessages(prev => {
+                if (prev.some(m => m.id === newMessage.id)) return prev;
+                return [...prev, newMessage];
+            });
+            if (newMessage.senderId !== currentUser.uid && newMessage.timestamp > Date.now() - 5000) {
+                 playSound('incoming');
+            }
+        }
+    };
+
+    const handleChildChanged = (snapshot: firebase.database.DataSnapshot) => {
+        const changedMessage = { id: snapshot.key, ...snapshot.val() } as Message;
+        if (changedMessage.deletedFor?.[currentUser.uid]) {
+            setMessages(prev => prev.filter(m => m.id !== changedMessage.id));
+        } else {
+            setMessages(prev => prev.map(m => m.id === changedMessage.id ? changedMessage : m));
+        }
+    };
+    
+    const handleChildRemoved = (snapshot: firebase.database.DataSnapshot) => {
+        setMessages(prev => prev.filter(m => m.id !== snapshot.key));
+    };
+
+    q.on('child_added', handleChildAdded);
+    q.on('child_changed', handleChildChanged);
+    q.on('child_removed', handleChildRemoved);
+
+    return () => {
+        q.off('child_added', handleChildAdded);
+        q.off('child_changed', handleChildChanged);
+        q.off('child_removed', handleChildRemoved);
+    };
+  }, [chat.id, currentUser.uid]);
 
   // Presence, Typing, and Pinned Message listener
   useEffect(() => {
-    const presenceUnsubscribe = db.collection('presence').doc(realtimeOtherParticipant.uid)
-        .onSnapshot(doc => setOtherUserPresence(doc.data() as Presence));
+    const presenceRef = db.ref(`presence/${realtimeOtherParticipant.uid}`);
+    const presenceListener = presenceRef.on('value', snap => setOtherUserPresence(snap.val() as Presence), 
+        error => console.error("RTDB Error: Failed to listen for presence.", error));
     
-    const chatUnsubscribe = chatRef.onSnapshot(async (doc) => {
-        const data = doc.data();
-        if (data?.typing) setIsOtherUserTyping(data.typing[realtimeOtherParticipant.uid] || false);
+    const chatListener = chatRef.on('value', async (snapshot) => {
+        try {
+            const data = snapshot.val();
+            if (data?.typing) setIsOtherUserTyping(data.typing[realtimeOtherParticipant.uid] || false);
 
-        if (data?.pinnedMessageId) {
-            if (pinnedMessage?.id !== data.pinnedMessageId) {
-                const pinnedMsgDoc = await chatMessagesRef.doc(data.pinnedMessageId).get();
-                if (pinnedMsgDoc.exists) {
-                    const pinnedMsgData = { id: pinnedMsgDoc.id, ...pinnedMsgDoc.data() } as Message;
-                    if (!pinnedMsgData.deletedFor?.includes(currentUser.uid)) {
-                        setPinnedMessage(pinnedMsgData);
+            if (data?.pinnedMessageId) {
+                if (pinnedMessage?.id !== data.pinnedMessageId) {
+                    const pinnedMsgSnap = await chatMessagesRef.child(data.pinnedMessageId).once('value');
+                    if (pinnedMsgSnap.exists()) {
+                        const pinnedMsgData = { id: pinnedMsgSnap.key, ...pinnedMsgSnap.val() } as Message;
+                        if (!pinnedMsgData.deletedFor?.[currentUser.uid]) {
+                            setPinnedMessage(pinnedMsgData);
+                        } else {
+                            setPinnedMessage(null);
+                        }
                     } else {
                         setPinnedMessage(null);
+                        await chatRef.child('pinnedMessageId').remove();
                     }
-                } else {
-                    setPinnedMessage(null);
-                    chatRef.update({ pinnedMessageId: firebase.firestore.FieldValue.delete() });
                 }
+            } else {
+                setPinnedMessage(null);
             }
-        } else {
-            setPinnedMessage(null);
+        } catch (error) {
+            console.error("RTDB Error: Failed to process chat updates.", error);
         }
-    });
+    }, error => console.error("RTDB Error: Failed to listen for chat document.", error));
 
     return () => {
-        presenceUnsubscribe();
-        chatUnsubscribe();
+        presenceRef.off('value', presenceListener);
+        chatRef.off('value', chatListener);
     };
   }, [chat.id, realtimeOtherParticipant.uid, pinnedMessage?.id, currentUser.uid]);
 
@@ -167,14 +193,16 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ chat, onBack, currentUser, onSt
   useEffect(() => {
     const markMessagesAsRead = () => {
         if (messages.length > 0 && document.visibilityState === 'visible') {
-            chatRef.update({ [`unreadCount.${currentUser.uid}`]: 0 });
-            const batch = db.batch();
+            chatRef.child(`unreadCount/${currentUser.uid}`).set(0).catch(e => console.error("Error resetting unread count", e));
+            const updates: { [key: string]: boolean } = {};
             messages.forEach(msg => {
-                if (msg.senderId === realtimeOtherParticipant.uid && !msg.readBy.includes(currentUser.uid)) {
-                    batch.update(chatMessagesRef.doc(msg.id), { readBy: firebase.firestore.FieldValue.arrayUnion(currentUser.uid) });
+                if (msg.senderId === realtimeOtherParticipant.uid && (!msg.readBy || !msg.readBy[currentUser.uid])) {
+                    updates[`/messages/${chat.id}/${msg.id}/readBy/${currentUser.uid}`] = true;
                 }
             });
-            batch.commit().catch(console.error);
+            if (Object.keys(updates).length > 0) {
+              db.ref().update(updates).catch(e => console.error("Error marking messages as read", e));
+            }
         }
     }
     markMessagesAsRead();
@@ -185,32 +213,38 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ chat, onBack, currentUser, onSt
   const handleSendMessage = async (text: string) => {
     if (!text.trim()) return;
     
-    const newMessageData: Omit<Message, 'id' | 'timestamp'> & { timestamp: any } = {
-        text,
-        timestamp: firebase.firestore.FieldValue.serverTimestamp(),
-        senderId: currentUser.uid,
-        readBy: [currentUser.uid],
-    };
-
-    if (replyingTo) {
-        newMessageData.replyTo = {
-            messageId: replyingTo.id,
-            text: replyingTo.text,
-            senderName: replyingTo.senderId === currentUser.uid ? currentUser.name : (currentUser.nicknames?.[realtimeOtherParticipant.uid] || realtimeOtherParticipant.name),
+    try {
+        const newMessageRef = chatMessagesRef.push();
+        const newMessageData: Omit<Message, 'id'> = {
+            text,
+            timestamp: firebase.database.ServerValue.TIMESTAMP as number,
+            senderId: currentUser.uid,
+            readBy: { [currentUser.uid]: true },
         };
-        setReplyingTo(null);
-    }
-    
-    const addedMessageRef = await chatMessagesRef.add(newMessageData);
-    
-    const finalMessageDoc = await addedMessageRef.get();
-    const finalMessage = { id: finalMessageDoc.id, ...finalMessageDoc.data() } as Message;
 
-    await chatRef.update({
-        lastMessage: finalMessage,
-        [`unreadCount.${realtimeOtherParticipant.uid}`]: firebase.firestore.FieldValue.increment(1)
-    });
-    playSound('outgoing');
+        if (replyingTo) {
+            newMessageData.replyTo = {
+                messageId: replyingTo.id,
+                text: replyingTo.text,
+                senderName: replyingTo.senderId === currentUser.uid ? currentUser.name : (currentUser.nicknames?.[realtimeOtherParticipant.uid] || realtimeOtherParticipant.name),
+            };
+            setReplyingTo(null);
+        }
+        
+        await newMessageRef.set(newMessageData);
+        
+        const finalMessage = { ...newMessageData, id: newMessageRef.key! } as Message;
+
+        await chatRef.update({
+            lastMessage: finalMessage,
+        });
+        await chatRef.child(`unreadCount/${realtimeOtherParticipant.uid}`).set(firebase.database.ServerValue.increment(1));
+
+        playSound('outgoing');
+    } catch (error) {
+        console.error("RTDB Error: Failed to send message.", error);
+        alert("Could not send message. Please try again.");
+    }
   };
 
   const handleSendMedia = async (file: File) => {
@@ -221,97 +255,167 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ chat, onBack, currentUser, onSt
         return;
     }
     
-    setIsUploadingMedia(true);
-    try {
-        const fileToUpload = isImage ? await compressImage(file) : file;
-        
-        const messageRef = chatMessagesRef.doc();
-        const storageRef = storage.ref(`media/${chat.id}/${messageRef.id}-${file.name}`);
-        
-        const uploadTask = await storageRef.put(fileToUpload);
-        const downloadURL = await uploadTask.ref.getDownloadURL();
+    const fileToUpload = isImage ? await compressImage(file) : file;
+    
+    setUploadState({ progress: 0, fileName: file.name });
+    
+    const messageRef = chatMessagesRef.push();
+    const storageRef = storage.ref(`media/${chat.id}/${messageRef.key}-${file.name}`);
+    
+    const uploadTask = storageRef.put(fileToUpload);
 
-        const messageText = isImage ? "📷 Image" : "📹 Video";
-
-        const newMessageData: Omit<Message, 'id'|'timestamp'> & { timestamp: any } = {
-            text: messageText,
-            mediaType: isImage ? 'image' : 'video',
-            mediaUrl: downloadURL,
-            timestamp: firebase.firestore.FieldValue.serverTimestamp(),
-            senderId: currentUser.uid,
-            readBy: [currentUser.uid],
-        };
-        
-        await messageRef.set(newMessageData);
-        
-        const finalMessageDoc = await messageRef.get();
-        const finalMessage = { id: finalMessageDoc.id, ...finalMessageDoc.data() } as Message;
-
-        await chatRef.update({
-            lastMessage: finalMessage,
-            [`unreadCount.${realtimeOtherParticipant.uid}`]: firebase.firestore.FieldValue.increment(1)
-        });
-        playSound('outgoing');
-    } catch (error) {
+    uploadTask.on('state_changed',
+      (snapshot) => {
+        const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
+        setUploadState(prevState => prevState ? { ...prevState, progress } : { progress, fileName: file.name });
+      },
+      (error) => {
         console.error("Error sending media message:", error);
         alert("Could not send media. Please check your Firebase Storage rules and try again.");
-    } finally {
-        setIsUploadingMedia(false);
-    }
+        setUploadState(null);
+      },
+      async () => {
+        try {
+            const downloadURL = await uploadTask.snapshot.ref.getDownloadURL();
+
+            const messageText = isImage ? "📷 Image" : "📹 Video";
+
+            const newMessageData: Omit<Message, 'id'> = {
+                text: messageText,
+                mediaType: isImage ? 'image' : 'video',
+                mediaUrl: downloadURL,
+                timestamp: firebase.database.ServerValue.TIMESTAMP as number,
+                senderId: currentUser.uid,
+                readBy: { [currentUser.uid]: true },
+            };
+            
+            await messageRef.set(newMessageData);
+            
+            const finalMessage = { ...newMessageData, id: messageRef.key! } as Message;
+
+             await chatRef.update({
+                lastMessage: finalMessage,
+            });
+            await chatRef.child(`unreadCount/${realtimeOtherParticipant.uid}`).set(firebase.database.ServerValue.increment(1));
+            playSound('outgoing');
+        } catch (error) {
+            console.error("Error saving media message to RTDB:", error);
+            alert("Media uploaded, but failed to send message. Please try again.");
+        } finally {
+            setUploadState(null);
+        }
+      }
+    );
   };
 
-  const handleSendAudio = async (audioBlob: Blob) => {
-    const messageRef = chatMessagesRef.doc();
-    const storageRef = storage.ref(`audio/${chat.id}/${messageRef.id}.webm`);
+  const handleSendAudio = (audioBlob: Blob) => {
+    const fileName = `Voice Message.webm`;
+    const messageRef = chatMessagesRef.push();
+    const storageRef = storage.ref(`audio/${chat.id}/${messageRef.key}.webm`);
     
-    setIsUploadingMedia(true);
-    try {
-        const uploadTask = await storageRef.put(audioBlob);
-        const downloadURL = await uploadTask.ref.getDownloadURL();
+    setUploadState({ progress: 0, fileName: fileName });
+    
+    const uploadTask = storageRef.put(audioBlob);
 
-        const newMessageData: Omit<Message, 'id'|'timestamp'> & { timestamp: any } = {
-            text: "🎤 Voice Message",
-            mediaType: 'audio',
-            mediaUrl: downloadURL,
-            timestamp: firebase.firestore.FieldValue.serverTimestamp(),
-            senderId: currentUser.uid,
-            readBy: [currentUser.uid],
-        };
-        
-        await messageRef.set(newMessageData);
-        
-        const finalMessageDoc = await messageRef.get();
-        const finalMessage = { id: finalMessageDoc.id, ...finalMessageDoc.data() } as Message;
-
-        await chatRef.update({
-            lastMessage: finalMessage,
-            [`unreadCount.${realtimeOtherParticipant.uid}`]: firebase.firestore.FieldValue.increment(1)
-        });
-        playSound('outgoing');
-    } catch (error) {
+    uploadTask.on('state_changed',
+      (snapshot) => {
+        const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
+        setUploadState(prevState => prevState ? { ...prevState, progress } : { progress, fileName });
+      },
+      (error) => {
         console.error("Error sending audio message:", error);
         alert("Could not send voice message. Please check your Firebase Storage rules and try again.");
-    } finally {
-        setIsUploadingMedia(false);
+        setUploadState(null);
+      },
+      async () => {
+        try {
+            const downloadURL = await uploadTask.snapshot.ref.getDownloadURL();
+
+            const newMessageData: Omit<Message, 'id'> = {
+                text: "🎤 Voice Message",
+                mediaType: 'audio',
+                mediaUrl: downloadURL,
+                timestamp: firebase.database.ServerValue.TIMESTAMP as number,
+                senderId: currentUser.uid,
+                readBy: { [currentUser.uid]: true },
+            };
+            
+            await messageRef.set(newMessageData);
+            
+            const finalMessage = { ...newMessageData, id: messageRef.key! } as Message;
+
+            await chatRef.update({
+                lastMessage: finalMessage,
+            });
+            await chatRef.child(`unreadCount/${realtimeOtherParticipant.uid}`).set(firebase.database.ServerValue.increment(1));
+            playSound('outgoing');
+        } catch (error) {
+            console.error("Error saving audio message to RTDB:", error);
+            alert("Audio uploaded, but failed to send message. Please try again.");
+        } finally {
+            setUploadState(null);
+        }
+      }
+    );
+  };
+
+  const handleSendLocation = async () => {
+    if (!navigator.geolocation) {
+      alert("Geolocation is not supported by your browser.");
+      return;
+    }
+
+    try {
+        if (navigator.permissions) {
+            const permissionStatus = await navigator.permissions.query({ name: 'geolocation' as PermissionName });
+            if (permissionStatus.state === 'denied') {
+                setPermissionError({ name: 'geolocation', feature: 'location sharing' });
+                setIsPermissionModalOpen(true);
+                return;
+            }
+        }
+
+        navigator.geolocation.getCurrentPosition(
+            (position) => {
+                const { latitude, longitude } = position.coords;
+                const locationUrl = `https://www.google.com/maps?q=${latitude},${longitude}`;
+                handleSendMessage(`My current location: ${locationUrl}`);
+            },
+            (error) => {
+                console.error(`Geolocation error: ${error.message}`);
+                setPermissionError({ name: 'geolocation', feature: 'location sharing' });
+                setIsPermissionModalOpen(true);
+            }
+        );
+    } catch (err) {
+        console.error("Error checking geolocation permission:", err);
+        alert("Could not check location permissions. Please try again.");
     }
   };
 
   const setTypingStatus = useDebouncedCallback((isTyping: boolean) => {
-    chatRef.update({ [`typing.${currentUser.uid}`]: isTyping });
+    chatRef.child(`typing/${currentUser.uid}`).set(isTyping).catch(error => console.error("RTDB Error: Failed to update typing status.", error));
   }, 300);
 
   const handleUpdateMessage = async () => {
     if (!editingMessage || !editText.trim()) return;
-    await chatMessagesRef.doc(editingMessage.id).update({ text: editText, isEdited: true });
-    setEditingMessage(null);
-    setEditText("");
+    try {
+      await chatMessagesRef.child(editingMessage.id).update({ text: editText, isEdited: true });
+      setEditingMessage(null);
+      setEditText("");
+    } catch(error) {
+      console.error("RTDB Error: Failed to update message.", error);
+      alert("Could not edit message. Please try again.");
+    }
   };
 
   const handleDeleteMessage = async (message: Message) => {
-    const messageRef = chatMessagesRef.doc(message.id);
-    await messageRef.update({
-        deletedFor: firebase.firestore.FieldValue.arrayUnion(currentUser.uid)
-    });
+    try {
+      await chatMessagesRef.child(`${message.id}/deletedFor/${currentUser.uid}`).set(true);
+    } catch(error) {
+      console.error("RTDB Error: Failed to delete message.", error);
+      alert("Could not delete message. Please try again.");
+    }
   };
 
   const handleToggleMessageSelection = (messageId: string) => {
@@ -329,13 +433,17 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ chat, onBack, currentUser, onSt
 
   const handleDeleteSelected = async () => {
     if (window.confirm(`Are you sure you want to delete ${selectedMessages.length} message(s) for you?`)) {
-      const batch = db.batch();
-      selectedMessages.forEach(id => {
-        const ref = chatMessagesRef.doc(id);
-        batch.update(ref, { deletedFor: firebase.firestore.FieldValue.arrayUnion(currentUser.uid) });
-      });
-      await batch.commit();
-      handleCancelSelection();
+        const updates: { [key: string]: boolean } = {};
+        selectedMessages.forEach(id => {
+            updates[`/messages/${chat.id}/${id}/deletedFor/${currentUser.uid}`] = true;
+        });
+      try {
+        await db.ref().update(updates);
+        handleCancelSelection();
+      } catch (error) {
+        console.error("RTDB Error: Failed to delete selected messages.", error);
+        alert("Could not delete messages. Please try again.");
+      }
     }
   };
 
@@ -357,73 +465,46 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ chat, onBack, currentUser, onSt
   };
   
   const handleAddReaction = (message: Message, emoji: string) => {
-    setMessages(prevMessages => prevMessages.map(msg => {
-      if (msg.id === message.id) {
-        const newReactions: ReactionMap = { ...(msg.reactions || {}) };
+    const reactionRef = chatMessagesRef.child(`${message.id}/reactions`);
+    
+    reactionRef.transaction(reactions => {
+        if (reactions === null) {
+            reactions = {};
+        }
         
         let userPreviousReaction: string | null = null;
-        for (const e in newReactions) {
-          if (newReactions[e].includes(currentUser.uid)) {
-            userPreviousReaction = e;
-            break;
-          }
-        }
-
-        if (userPreviousReaction) {
-          newReactions[userPreviousReaction] = newReactions[userPreviousReaction].filter(uid => uid !== currentUser.uid);
-          if (newReactions[userPreviousReaction].length === 0) {
-            delete newReactions[userPreviousReaction];
-          }
-        }
-
-        if (userPreviousReaction !== emoji) {
-            if (!newReactions[emoji]) {
-                newReactions[emoji] = [];
-            }
-            newReactions[emoji].push(currentUser.uid);
-        }
-
-        return { ...msg, reactions: newReactions };
-      }
-      return msg;
-    }));
-
-    const messageRef = chatMessagesRef.doc(message.id);
-    db.runTransaction(async (transaction) => {
-        const doc = await transaction.get(messageRef);
-        if (!doc.exists) return;
-
-        const reactions = (doc.data()?.reactions || {}) as ReactionMap;
-
-        let previousReaction: string | null = null;
-        for (const key in reactions) {
-            if (reactions[key].includes(currentUser.uid)) {
-                previousReaction = key;
+        for (const e in reactions) {
+            if (reactions[e] && reactions[e][currentUser.uid]) {
+                userPreviousReaction = e;
                 break;
             }
         }
-
-        if (previousReaction === emoji) {
-            reactions[previousReaction] = reactions[previousReaction].filter(uid => uid !== currentUser.uid);
-        } else {
-            if (previousReaction) {
-                reactions[previousReaction] = reactions[previousReaction].filter(uid => uid !== currentUser.uid);
-            }
-            if (!reactions[emoji]) reactions[emoji] = [];
-            reactions[emoji].push(currentUser.uid);
-        }
         
-        transaction.update(messageRef, { reactions });
-    }).catch(console.error);
+        if (userPreviousReaction) {
+            reactions[userPreviousReaction][currentUser.uid] = null; // Remove previous reaction
+            if(Object.keys(reactions[userPreviousReaction]).length === 0) {
+              reactions[userPreviousReaction] = null;
+            }
+        }
+
+        if (userPreviousReaction !== emoji) {
+            if (!reactions[emoji]) {
+                reactions[emoji] = {};
+            }
+            reactions[emoji][currentUser.uid] = true;
+        }
+
+        return reactions;
+    }).catch(e => console.error("RTDB Error: Failed to update reaction.", e));
   };
 
   const handleReportUser = () => {
     setHeaderMenuOpen(false);
     const displayName = currentUser.nicknames?.[realtimeOtherParticipant.uid] || realtimeOtherParticipant.name;
     if(window.confirm(`Are you sure you want to report ${displayName}? This action cannot be undone.`)) {
-        db.collection('reports').add({
+        db.ref('reports').push().set({
             reportedUserId: realtimeOtherParticipant.uid, reportedBy: currentUser.uid, reason: "Reported from chat menu", chatId: chat.id,
-            timestamp: firebase.firestore.FieldValue.serverTimestamp()
+            timestamp: firebase.database.ServerValue.TIMESTAMP
         }).then(() => alert(`${displayName} has been reported successfully.`)).catch(() => alert('Failed to submit report. Please try again.'))
           .finally(() => handleBlockUser(false));
     }
@@ -433,11 +514,14 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ chat, onBack, currentUser, onSt
     setHeaderMenuOpen(false);
     const displayName = currentUser.nicknames?.[realtimeOtherParticipant.uid] || realtimeOtherParticipant.name;
     const blockAction = async () => {
-        await db.collection('users').doc(currentUser.uid).update({
-            blockedUsers: firebase.firestore.FieldValue.arrayUnion(realtimeOtherParticipant.uid)
-        });
+      try {
+        await db.ref(`users/${currentUser.uid}/blockedUsers/${realtimeOtherParticipant.uid}`).set(true);
         alert(`${displayName} has been blocked.`);
         onBack();
+      } catch (error) {
+        console.error("RTDB Error: Failed to block user.", error);
+        alert("Could not block user. Please try again.");
+      }
     };
 
     if (confirm) {
@@ -450,12 +534,17 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ chat, onBack, currentUser, onSt
   };
 
   const handleTogglePin = async (message: Message) => {
-    const chatDoc = await chatRef.get();
-    const currentPinnedId = chatDoc.data()?.pinnedMessageId;
-    if (currentPinnedId === message.id) {
-        await chatRef.update({ pinnedMessageId: firebase.firestore.FieldValue.delete() });
-    } else {
-        await chatRef.update({ pinnedMessageId: message.id });
+    try {
+      const chatSnap = await chatRef.once('value');
+      const currentPinnedId = chatSnap.val()?.pinnedMessageId;
+      if (currentPinnedId === message.id) {
+          await chatRef.child('pinnedMessageId').remove();
+      } else {
+          await chatRef.child('pinnedMessageId').set(message.id);
+      }
+    } catch(error) {
+      console.error("RTDB Error: Failed to pin message.", error);
+      alert("Could not pin message. Please try again.");
     }
   };
   
@@ -477,9 +566,21 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ chat, onBack, currentUser, onSt
     setHeaderMenuOpen(!headerMenuOpen);
   };
 
+  const handleTranslateMessage = async (message: Message) => {
+    if (translatedMessages[message.id]?.text || message.mediaType) return;
+    setTranslatedMessages(prev => ({ ...prev, [message.id]: { text: '', isLoading: true } }));
+    try {
+        const translation = await translateText(message.text, "Burmese");
+        setTranslatedMessages(prev => ({ ...prev, [message.id]: { text: translation, isLoading: false } }));
+    } catch (error) {
+        setTranslatedMessages(prev => ({ ...prev, [message.id]: { text: "Translation failed.", isLoading: false } }));
+    }
+  };
+
 
   const contextMenuOptions = useMemo(() => contextMenuMessage ? [
         contextMenuMessage.mediaType !== 'audio' && { label: 'Copy', icon: Copy, onClick: () => navigator.clipboard.writeText(contextMenuMessage.text) },
+        !contextMenuMessage.mediaType && { label: 'Translate', icon: Languages, onClick: () => handleTranslateMessage(contextMenuMessage) },
         contextMenuMessage.senderId === currentUser.uid && !contextMenuMessage.mediaType && { label: 'Edit', icon: Edit, onClick: () => { setEditingMessage(contextMenuMessage); setEditText(contextMenuMessage.text); }},
         { label: pinnedMessage?.id === contextMenuMessage.id ? 'Unpin' : 'Pin', icon: Pin, onClick: () => handleTogglePin(contextMenuMessage) },
         { label: 'Delete for me', icon: Trash, onClick: () => handleDeleteMessage(contextMenuMessage), isDestructive: true },
@@ -505,7 +606,7 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ chat, onBack, currentUser, onSt
       )
     }
 
-    let statusText = otherUserPresence?.lastSeen ? `Last seen: ${new Date(otherUserPresence.lastSeen.toDate()).toLocaleString()}` : 'Offline';
+    let statusText = otherUserPresence?.lastSeen ? `Last seen: ${new Date(otherUserPresence.lastSeen).toLocaleString()}` : 'Offline';
     let statusColor = 'text-text-primary/70 dark:text-gray-400';
     if (otherUserPresence?.isOnline) {
         statusText = 'Online';
@@ -544,8 +645,8 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ chat, onBack, currentUser, onSt
             </div>
         </button>
         <div className="flex items-center gap-4">
-          <button onClick={() => onStartCall('audio', realtimeOtherParticipant)} className="text-accent-brand hover:opacity-80"><Phone size={22} /></button>
-          <button onClick={() => onStartCall('video', realtimeOtherParticipant)} className="text-accent-brand hover:opacity-80"><Video size={22} /></button>
+          <button onClick={() => onStartCall('audio', realtimeOtherParticipant, chat.id)} className="text-accent-brand hover:opacity-80"><Phone size={22} /></button>
+          <button onClick={() => onStartCall('video', realtimeOtherParticipant, chat.id)} className="text-accent-brand hover:opacity-80"><Video size={22} /></button>
           <div className="relative">
             <button onClick={handleHeaderMenuToggle} className="text-text-primary/80 dark:text-gray-300 hover:text-text-primary dark:hover:text-white"><MoreVertical size={22} /></button>
             {headerMenuOpen && (
@@ -598,6 +699,12 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ chat, onBack, currentUser, onSt
         onClick={() => { if(headerMenuOpen) setHeaderMenuOpen(false); }}
         onContextMenu={handleMainContextMenu}
       >
+        <PermissionModal 
+            isOpen={isPermissionModalOpen}
+            onClose={() => setIsPermissionModalOpen(false)}
+            permissionName={permissionError?.name || 'microphone'}
+            featureName={permissionError?.feature || 'this feature'}
+        />
         {filteredMessages.map(msg => (
           <ChatBubble 
             key={msg.id} message={msg} currentUser={currentUser} otherParticipant={realtimeOtherParticipant}
@@ -610,6 +717,7 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ chat, onBack, currentUser, onSt
             isSelected={selectedMessages.includes(msg.id)}
             userCache={userCache}
             id={`msg-${msg.id}`}
+            translation={translatedMessages[msg.id]}
           />
         ))}
         <div ref={messagesEndRef} />
@@ -660,17 +768,25 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ chat, onBack, currentUser, onSt
                     onSendAudio={handleSendAudio} 
                     onSendMedia={handleSendMedia} 
                     onTyping={setTypingStatus}
-                    disabled={isUploadingMedia} 
+                    onSendLocation={handleSendLocation}
+                    disabled={!!uploadState} 
                 />
               </>
             )}
         </>
       )}
 
-      {isUploadingMedia && (
-        <div className="p-2 bg-base-tan dark:bg-gray-900 text-center text-sm font-semibold text-text-primary/70 dark:text-gray-400 flex items-center justify-center gap-2">
-          <Loader2 size={16} className="animate-spin" />
-          <span>Sending media...</span>
+      {uploadState && (
+        <div className="p-2 bg-base-tan dark:bg-gray-900">
+            <div className="text-sm text-text-primary/80 dark:text-gray-300">
+                <div className="flex justify-between items-center mb-1 px-1">
+                    <span className="font-semibold truncate pr-2">Uploading: {uploadState.fileName}</span>
+                    <span className="font-semibold">{Math.round(uploadState.progress)}%</span>
+                </div>
+                <div className="w-full bg-black/10 dark:bg-white/10 rounded-full h-1.5">
+                    <div className="bg-accent-brand h-1.5 rounded-full transition-all duration-150" style={{ width: `${uploadState.progress}%` }}></div>
+                </div>
+            </div>
         </div>
       )}
 

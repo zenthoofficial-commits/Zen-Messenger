@@ -34,7 +34,7 @@ const NotificationSettingsScreen: React.FC<NotificationSettingsScreenProps> = ({
   const saveSettings = useDebouncedCallback(async (newSettings: Settings) => {
     setIsSaving(true);
     try {
-        await db.collection('users').doc(currentUser.uid).update({
+        await db.ref(`users/${currentUser.uid}`).update({
             notificationSettings: newSettings
         });
     } catch (error) {

@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { User } from '../types';
 import Avatar from '../components/Avatar';
-import { ArrowLeft, Pencil, Copy } from 'lucide-react';
+import { ArrowLeft, Pencil, Copy, UserX } from 'lucide-react';
 import { db } from '../firebase';
 import firebase from 'firebase/compat/app';
 
@@ -9,9 +9,10 @@ interface UserProfileViewScreenProps {
   user: User;
   currentUser: User;
   onBack: () => void;
+  onBlockUser: (userToBlock: User) => void;
 }
 
-const UserProfileViewScreen: React.FC<UserProfileViewScreenProps> = ({ user, currentUser, onBack }) => {
+const UserProfileViewScreen: React.FC<UserProfileViewScreenProps> = ({ user, currentUser, onBack, onBlockUser }) => {
   const [isViewerOpen, setIsViewerOpen] = useState(false);
 
   const handleSetNickname = async () => {
@@ -21,16 +22,12 @@ const UserProfileViewScreen: React.FC<UserProfileViewScreenProps> = ({ user, cur
     if (newNickname === null) return; // User cancelled the prompt
 
     try {
-        const userRef = db.collection('users').doc(currentUser.uid);
+        const nicknameRef = db.ref(`users/${currentUser.uid}/nicknames/${user.uid}`);
         if (newNickname.trim() === "") {
-            await userRef.update({
-                [`nicknames.${user.uid}`]: firebase.firestore.FieldValue.delete()
-            });
+            await nicknameRef.remove();
             alert("Nickname removed. The change will appear shortly.");
         } else {
-            await userRef.update({
-                [`nicknames.${user.uid}`]: newNickname.trim()
-            });
+            await nicknameRef.set(newNickname.trim());
             alert(`Nickname set to "${newNickname.trim()}". The change will appear shortly.`);
         }
     } catch (error) {
@@ -56,7 +53,7 @@ const UserProfileViewScreen: React.FC<UserProfileViewScreenProps> = ({ user, cur
       </header>
       
       <main className="flex-1 flex flex-col items-center justify-center p-4">
-        <div className="p-6 bg-secondary-cream dark:bg-gray-800 flex flex-col items-center rounded-2xl shadow-lg">
+        <div className="p-6 bg-secondary-cream dark:bg-gray-800 flex flex-col items-center rounded-2xl shadow-lg w-full max-w-sm">
             <button onClick={() => setIsViewerOpen(true)} className="rounded-full focus:outline-none focus:ring-4 focus:ring-accent-brand/50">
               <Avatar src={user.avatarUrl || `https://picsum.photos/seed/${user.uid}/100/100`} alt={user.name} size="lg" />
             </button>
@@ -74,6 +71,13 @@ const UserProfileViewScreen: React.FC<UserProfileViewScreenProps> = ({ user, cur
               <span className="break-all">UID: {user.uid}</span>
               <Copy size={14} className="flex-shrink-0"/>
             </div>
+            <button 
+                onClick={() => onBlockUser(user)} 
+                className="w-full mt-6 bg-red-500/10 text-red-500 font-semibold py-3 rounded-xl flex items-center justify-center gap-2 hover:bg-red-500/20 transition-colors"
+            >
+                <UserX size={18} />
+                Block {displayName}
+            </button>
         </div>
       </main>
 

@@ -22,17 +22,12 @@ const NotificationScreen: React.FC<NotificationScreenProps> = ({ currentUser, no
 
   const handleClearAll = async () => {
     if (window.confirm('Are you sure you want to clear all notifications?')) {
-        const batch = db.batch();
-        const notifCollectionRef = db.collection('users').doc(currentUser.uid).collection('notifications');
-        notifications.forEach(notif => {
-            batch.delete(notifCollectionRef.doc(notif.id));
-        });
-        await batch.commit();
+        await db.ref(`userNotifications/${currentUser.uid}`).remove();
     }
   };
 
   const handleDelete = async (notificationId: string) => {
-    await db.collection('users').doc(currentUser.uid).collection('notifications').doc(notificationId).delete();
+    await db.ref(`userNotifications/${currentUser.uid}/${notificationId}`).remove();
     setDeletingId(null);
   };
 
@@ -88,7 +83,7 @@ const NotificationScreen: React.FC<NotificationScreenProps> = ({ currentUser, no
                                 <h3 className="font-bold text-text-primary dark:text-gray-100">{notif.title}</h3>
                                 <p className="text-text-primary/80 dark:text-gray-300 text-sm mt-0.5">{notif.body}</p>
                                 <p className="text-xs text-text-primary/60 dark:text-gray-400 mt-1">
-                                    {formatDistanceToNow(notif.timestamp.toDate(), { addSuffix: true })}
+                                    {formatDistanceToNow(new Date(notif.timestamp), { addSuffix: true })}
                                 </p>
                             </div>
                             {deletingId === notif.id && (

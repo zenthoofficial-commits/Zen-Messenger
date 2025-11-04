@@ -20,7 +20,7 @@ const ChatListItem: React.FC<ChatListItemProps> = ({ chat, currentUserId, onClic
 
   const formatTimestamp = (timestamp: any) => {
     if (!timestamp) return '';
-    const date = timestamp.toDate();
+    const date = new Date(timestamp);
     const today = new Date();
     if (date.toDateString() === today.toDateString()) {
       return format(date, 'p'); // e.g., 9:42 PM

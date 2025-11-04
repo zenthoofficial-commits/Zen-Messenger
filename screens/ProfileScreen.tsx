@@ -1,8 +1,9 @@
 import React, { useState, useRef } from 'react';
 import { User } from '../types';
 import Avatar from '../components/Avatar';
-import { ArrowLeft, User as UserIcon, Bell, Shield, Palette, HelpCircle, LogOut, ChevronRight, Lock, EyeOff, Copy, Camera, Loader2 } from 'lucide-react';
+import { ArrowLeft, User as UserIcon, Bell, Shield, Palette, HelpCircle, LogOut, ChevronRight, Lock, EyeOff, Copy, Camera, Loader2, Wallet } from 'lucide-react';
 import { db, storage } from '../firebase';
+import { compressImage } from '../utils/media';
 
 interface ProfileScreenProps {
   currentUser: User;
@@ -17,6 +18,7 @@ const ProfileScreen: React.FC<ProfileScreenProps> = ({ currentUser, onBack, onLo
 
   const settingsItems = [
     { icon: UserIcon, label: 'Account', description: 'Manage your account details' },
+    { icon: Wallet, label: 'My Wallet', description: 'Send and receive digital gifts' },
     { icon: Bell, label: 'Notifications', description: 'Customize your alerts' },
     { icon: Palette, label: 'Appearance', description: 'Change the theme and look' },
     { icon: HelpCircle, label: 'Help & Support', description: 'Get help and send feedback' },
@@ -44,25 +46,33 @@ const ProfileScreen: React.FC<ProfileScreenProps> = ({ currentUser, onBack, onLo
     
     setIsUploading(true);
     try {
-        // Workaround for potential storage rule issues: convert to a data URL and save directly to Firestore.
-        // This provides immediate feedback and "just works" in a demo environment.
-        const reader = new FileReader();
-        reader.readAsDataURL(file);
-        reader.onloadend = async () => {
-            const dataUrl = reader.result as string;
-            await db.collection('users').doc(currentUser.uid).update({
-                avatarUrl: dataUrl
-            });
-            alert("Profile picture updated successfully!");
-            setIsUploading(false);
-        };
-        reader.onerror = (error) => {
-            console.error("File reading error:", error);
-            throw new Error("Failed to read the selected file.");
-        };
+        const compressedFile = await compressImage(file);
+        const filePath = `avatars/${currentUser.uid}/${file.name}`;
+        const storageRef = storage.ref(filePath);
+        const uploadTask = storageRef.put(compressedFile);
 
+        uploadTask.on('state_changed', 
+            () => {}, // Progress handler (optional)
+            (error) => {
+                console.error("Storage Error: Failed to upload avatar.", error);
+                alert("Failed to upload new profile picture. Please try again.");
+                setIsUploading(false);
+            },
+            async () => {
+                try {
+                    const downloadURL = await uploadTask.snapshot.ref.getDownloadURL();
+                    await db.ref(`users/${currentUser.uid}`).update({ avatarUrl: downloadURL });
+                    alert("Profile picture updated successfully!");
+                } catch (error) {
+                    console.error("RTDB/Storage Error: Failed to update avatar URL.", error);
+                    alert("Failed to update profile picture. Please check permissions and try again.");
+                } finally {
+                    setIsUploading(false);
+                }
+            }
+        );
     } catch (error) {
-      console.error("Error updating avatar:", error);
+      console.error("Error initiating avatar update:", error);
       alert("Failed to update profile picture. Please try again.");
       setIsUploading(false);
     }

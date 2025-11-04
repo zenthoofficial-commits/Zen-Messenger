@@ -2,19 +2,22 @@ import React, { useState, useRef } from 'react';
 import { UserProfileData } from '../types';
 import SegmentedControl from '../components/SegmentedControl';
 import { Camera, Loader2 } from 'lucide-react';
+import { storage } from '../firebase';
+
 
 interface ProfileCreationScreenProps {
   uid: string;
-  onSave: (profile: UserProfileData) => void;
+  onSave: (profile: UserProfileData) => Promise<void>;
 }
 
-const ProfileCreationScreen: React.FC<ProfileCreationScreenProps> = ({ onSave }) => {
+const ProfileCreationScreen: React.FC<ProfileCreationScreenProps> = ({ uid, onSave }) => {
   const [name, setName] = useState('');
   const [birthday, setBirthday] = useState('');
   const [gender, setGender] = useState('Male');
   const [relationshipStatus, setRelationshipStatus] = useState('Single');
   const [error, setError] = useState('');
   const [avatarPreview, setAvatarPreview] = useState(() => `https://picsum.photos/seed/${Math.random()}/200/200`);
+  const [avatarFile, setAvatarFile] = useState<File | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -28,6 +31,7 @@ const ProfileCreationScreen: React.FC<ProfileCreationScreenProps> = ({ onSave })
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
+      setAvatarFile(file);
       const reader = new FileReader();
       reader.onloadend = () => {
         setAvatarPreview(reader.result as string);
@@ -36,7 +40,7 @@ const ProfileCreationScreen: React.FC<ProfileCreationScreenProps> = ({ onSave })
     }
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (isLoading) return;
 
     if (!name) {
@@ -61,22 +65,42 @@ const ProfileCreationScreen: React.FC<ProfileCreationScreenProps> = ({ onSave })
 
     setError('');
     setIsLoading(true);
-    // In a real app, if a file was selected, we would upload it to storage first.
-    // Here, we save the base64 data URL directly to Firestore for simplicity and to ensure it works.
-    onSave({ 
-        name, 
-        name_lowercase: name.toLowerCase(), 
-        birthday, 
-        gender, 
-        relationshipStatus, 
-        avatarUrl: avatarPreview,
-        accentColor: 'green',
-        chatBackgroundImageUrl: '',
-        notificationSettings: {
-            inApp: { newMessages: true, reactions: true },
-            push: { all: true }
+
+    let finalAvatarUrl = avatarPreview;
+
+    if (avatarFile) {
+        try {
+            const filePath = `avatars/${uid}/${Date.now()}_${avatarFile.name}`;
+            const storageRef = storage.ref(filePath);
+            const uploadTaskSnapshot = await storageRef.put(avatarFile);
+            finalAvatarUrl = await uploadTaskSnapshot.ref.getDownloadURL();
+        } catch (uploadError) {
+            console.error("Storage Error: Failed to upload avatar.", uploadError);
+            setError('Failed to upload profile picture. Please try again.');
+            setIsLoading(false);
+            return;
         }
-    });
+    }
+
+    try {
+        await onSave({ 
+            name, 
+            name_lowercase: name.toLowerCase(), 
+            birthday, 
+            gender, 
+            relationshipStatus, 
+            avatarUrl: finalAvatarUrl,
+            accentColor: 'green',
+            chatBackgroundImageUrl: '',
+            notificationSettings: {
+                inApp: { newMessages: true, reactions: true },
+                push: { all: true }
+            }
+        });
+    } catch (err) {
+        setError('Failed to save profile. Please check permissions and try again.');
+        setIsLoading(false);
+    }
   };
   
   return (

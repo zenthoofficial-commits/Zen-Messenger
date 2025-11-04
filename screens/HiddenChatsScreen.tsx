@@ -3,8 +3,6 @@ import { User, Chat, ChatWithDetails } from '../types';
 import { db } from '../firebase';
 import { ArrowLeft, Eye } from 'lucide-react';
 import ChatListItem from '../components/ChatListItem';
-import firebase from 'firebase/compat/app';
-
 
 interface HiddenChatsScreenProps {
   currentUser: User;
@@ -20,49 +18,67 @@ const HiddenChatsScreen: React.FC<HiddenChatsScreenProps> = ({ currentUser, onBa
 
   const fetchUserDetails = useCallback(async (uid: string): Promise<User | null> => {
     if (userCache[uid]) return userCache[uid];
-    const userDoc = await db.collection('users').doc(uid).get();
-    if (userDoc.exists) {
-        const userData = { uid, ...userDoc.data() } as User;
-        setUserCache(prev => ({ ...prev, [uid]: userData }));
-        return userData;
+    try {
+        const userSnap = await db.ref(`users/${uid}`).once('value');
+        if (userSnap.exists()) {
+            const userData = { uid: userSnap.key, ...userSnap.val() } as User;
+            setUserCache(prev => ({ ...prev, [uid]: userData }));
+            return userData;
+        }
+    } catch (error) {
+        console.error("RTDB Error: Failed to fetch user details in HiddenChatsScreen.", error);
     }
     return null;
   }, [userCache, setUserCache]);
 
   useEffect(() => {
-    const chatsRef = db.collection('chats');
+    const chatsRef = db.ref('chats');
     const q = chatsRef
-      .where('participants', 'array-contains', currentUser.uid)
-      .where(`hiddenBy.${currentUser.uid}`, '==', true);
+      .orderByChild(`hiddenBy/${currentUser.uid}`)
+      .equalTo(true);
     
-    const unsubscribe = q.onSnapshot(async (querySnapshot) => {
+    const listener = q.on('value', async (querySnapshot) => {
         setLoading(true);
-        const chatsData = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Chat));
-        
-        const chatsWithDetailsPromises = chatsData.map(async (chat) => {
-            const otherId = chat.participants.find(p => p !== currentUser.uid);
-            if(otherId) {
-                const otherUser = await fetchUserDetails(otherId);
-                if (otherUser) {
-                    return { ...chat, otherParticipant: otherUser, otherParticipantPresence: { isOnline: false, lastSeen: null } } as ChatWithDetails;
+        if (!querySnapshot.exists()) {
+            setHiddenChats([]);
+            setLoading(false);
+            return;
+        }
+        try {
+            const chatsData: Chat[] = [];
+            querySnapshot.forEach(snap => {
+                chatsData.push({ id: snap.key, ...snap.val() } as Chat)
+            });
+            
+            const chatsWithDetailsPromises = chatsData.map(async (chat) => {
+                const otherId = Object.keys(chat.participants).find(p => p !== currentUser.uid);
+                if(otherId) {
+                    const otherUser = await fetchUserDetails(otherId);
+                    if (otherUser) {
+                        return { ...chat, otherParticipant: otherUser, otherParticipantPresence: { isOnline: false, lastSeen: null } } as ChatWithDetails;
+                    }
                 }
-            }
-            return null;
-        });
+                return null;
+            });
 
-        const resolvedChats = (await Promise.all(chatsWithDetailsPromises)).filter(Boolean) as ChatWithDetails[];
-        setHiddenChats(resolvedChats);
+            const resolvedChats = (await Promise.all(chatsWithDetailsPromises)).filter(Boolean) as ChatWithDetails[];
+            setHiddenChats(resolvedChats);
+        } catch (error) {
+            console.error("RTDB Error: Failed to process hidden chats.", error);
+        } finally {
+            setLoading(false);
+        }
+    }, error => {
+        console.error("RTDB Error: Failed to listen for hidden chats.", error);
         setLoading(false);
     });
 
-    return () => unsubscribe();
+    return () => q.off('value', listener);
   }, [currentUser.uid, fetchUserDetails]);
 
   const handleUnhide = async (chatId: string) => {
     try {
-      await db.collection('chats').doc(chatId).update({
-        [`hiddenBy.${currentUser.uid}`]: firebase.firestore.FieldValue.delete()
-      });
+      await db.ref(`chats/${chatId}/hiddenBy/${currentUser.uid}`).remove();
     } catch (error) {
       console.error("Error unhiding chat:", error);
       alert("Failed to unhide chat. Please try again.");

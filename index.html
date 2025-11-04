@@ -48,6 +48,12 @@
           -ms-overflow-style: none;
           scrollbar-width: none;
       }
+      .filter-beauty {
+        filter: brightness(1.1) contrast(1.1) saturate(1.2);
+      }
+      .filter-vintage {
+        filter: grayscale(1) sepia(0.4) contrast(1.2) brightness(0.9);
+      }
     </style>
   <script type="importmap">
 {
@@ -57,7 +63,8 @@
     "lucide-react": "https://aistudiocdn.com/lucide-react@^0.546.0",
     "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/",
     "firebase/app": "https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js",
-    "firebase/firestore": "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js",
+    "firebase/database": "https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js",
+    "firebase/storage": "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage-compat.js",
     "firebase/analytics": "https://www.gstatic.com/firebasejs/10.12.2/firebase-analytics-compat.js",
     "firebase/auth": "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js",
     "date-fns": "https://aistudiocdn.com/date-fns@^4.1.0",

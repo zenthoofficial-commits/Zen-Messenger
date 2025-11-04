@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { User, Chat, ChatWithDetails, Presence } from '../types';
 import ChatListItem from '../components/ChatListItem';
 import Fab from '../components/Fab';
@@ -21,93 +21,165 @@ interface HomeScreenProps {
 }
 
 const HomeScreen: React.FC<HomeScreenProps> = ({ onSelectChat, currentUser, onSearchClick, onProfileClick, onNotificationsClick, unreadNotifCount, userCache, setUserCache, onFriendUidsUpdate }) => {
-    const [chats, setChats] = useState<Omit<ChatWithDetails, 'otherParticipantPresence'>[]>([]);
+    const [chats, setChats] = useState<Chat[]>([]);
     const [presence, setPresence] = useState<{ [uid: string]: Presence }>({});
     const [contextMenuChat, setContextMenuChat] = useState<ChatWithDetails | null>(null);
     const [isSearchVisible, setIsSearchVisible] = useState(false);
     const [searchQuery, setSearchQuery] = useState('');
+    const chatListenersRef = useRef<{ [chatId: string]: { ref: firebase.database.Reference, listener: (s: firebase.database.DataSnapshot) => void } }>({});
+
 
     const fetchUserDetails = useCallback(async (uid: string): Promise<User | null> => {
         if (userCache[uid]) return userCache[uid];
-        const userDoc = await db.collection('users').doc(uid).get();
-        if (userDoc.exists) {
-            const userData = { uid, ...userDoc.data() } as User;
-            setUserCache(prev => ({ ...prev, [uid]: userData }));
-            return userData;
+        try {
+            const userSnap = await db.ref(`users/${uid}`).once('value');
+            if (userSnap.exists()) {
+                const userData = { uid, ...userSnap.val() } as User;
+                setUserCache(prev => ({ ...prev, [uid]: userData }));
+                return userData;
+            }
+        } catch (error) {
+            console.error(`RTDB Error: Failed to fetch user details for UID: ${uid}`, error);
         }
         return null;
     }, [userCache, setUserCache]);
     
+    // This effect will fetch participant UIDs for the presence listener and for the search modal's friend list.
     useEffect(() => {
-        const q = db.collection("chats").where("participants", "array-contains", currentUser.uid);
+        const participantIds = chats
+            .map(c => Object.keys(c.participants).find(p => p !== currentUser.uid))
+            .filter(Boolean) as string[];
+        onFriendUidsUpdate(participantIds);
+    }, [chats, currentUser.uid, onFriendUidsUpdate]);
+    
+    // Main data fetching effect
+    useEffect(() => {
+        const userChatsRef = db.ref(`userChats/${currentUser.uid}`);
 
-        const unsubscribe = q.onSnapshot(async (querySnapshot) => {
-            const chatsData: Chat[] = querySnapshot.docs
-                .map(doc => ({ id: doc.id, ...doc.data() } as Chat))
-                .filter(chat => {
-                    if (chat.hiddenBy && chat.hiddenBy[currentUser.uid]) return false;
-                    const otherId = chat.participants.find(p => p !== currentUser.uid);
-                    if (currentUser.blockedUsers?.includes(otherId || '')) return false;
-                    return true;
-                });
-            
-            const participantIds = [...new Set(chatsData.map(c => c.participants.find(p => p !== currentUser.uid)).filter(Boolean) as string[])];
-            onFriendUidsUpdate(participantIds);
-            
-            const participantsToFetch = participantIds.filter(id => !userCache[id]);
-            if (participantsToFetch.length > 0) {
-                 const usersQuery = await db.collection('users').where(firebase.firestore.FieldPath.documentId(), 'in', participantsToFetch).get();
-                 usersQuery.forEach(doc => setUserCache(prev => ({...prev, [doc.id]: { uid: doc.id, ...doc.data()} as User })));
-            }
-            
-            const chatsWithDetailsPromises = chatsData.map(async (chat) => {
-                const otherId = chat.participants.find(p => p !== currentUser.uid);
-                if(otherId) {
-                    const otherUser = await fetchUserDetails(otherId);
-                    if (otherUser) return { ...chat, otherParticipant: otherUser };
+        const userChatsListener = userChatsRef.on('value', (snapshot) => {
+            const currentChatIds = snapshot.exists() ? Object.keys(snapshot.val()) : [];
+            const listeners = chatListenersRef.current;
+
+            // Remove listeners for chats the user is no longer part of
+            Object.keys(listeners).forEach(chatId => {
+                if (!currentChatIds.includes(chatId)) {
+                    listeners[chatId].ref.off('value', listeners[chatId].listener);
+                    delete listeners[chatId];
                 }
-                return null;
             });
 
-            const resolvedChats = (await Promise.all(chatsWithDetailsPromises)).filter(Boolean);
-            setChats(resolvedChats as Omit<ChatWithDetails, 'otherParticipantPresence'>[]);
+            // Remove chats from state that are no longer in the user's chat list
+            setChats(prev => prev.filter(c => currentChatIds.includes(c.id)));
+
+            // Add listeners for new chats
+            currentChatIds.forEach(chatId => {
+                if (!listeners[chatId]) {
+                    const chatRef = db.ref(`chats/${chatId}`);
+                    const chatListener = async (chatSnapshot: firebase.database.DataSnapshot) => {
+                        if (chatSnapshot.exists()) {
+                            const chatData = { id: chatSnapshot.key, ...chatSnapshot.val() } as Chat;
+                            
+                            const otherId = Object.keys(chatData.participants).find(p => p !== currentUser.uid);
+                            const isHidden = chatData.hiddenBy?.[currentUser.uid];
+                            const isBlocked = otherId ? currentUser.blockedUsers?.[otherId] : false;
+
+                            if (isHidden || isBlocked) {
+                                setChats(prev => prev.filter(c => c.id !== chatData.id));
+                                return;
+                            }
+                            
+                            if (otherId && !userCache[otherId]) {
+                               await fetchUserDetails(otherId);
+                            }
+
+                            setChats(prev => {
+                                const index = prev.findIndex(c => c.id === chatData.id);
+                                if (index > -1) {
+                                    const newChats = [...prev];
+                                    newChats[index] = chatData;
+                                    return newChats;
+                                }
+                                return [...prev, chatData];
+                            });
+                        } else {
+                            // Chat was deleted, remove from state and listener
+                            setChats(prev => prev.filter(c => c.id !== chatId));
+                             if (listeners[chatId]) {
+                                listeners[chatId].ref.off('value', listeners[chatId].listener);
+                                delete listeners[chatId];
+                            }
+                        }
+                    };
+
+                    chatRef.on('value', chatListener, error => {
+                        console.error(`RTDB Error: Failed to listen for chat ${chatId}.`, error);
+                    });
+                    listeners[chatId] = { ref: chatRef, listener: chatListener };
+                }
+            });
+        }, error => {
+            console.error("RTDB Error: Failed to listen for user chats.", error);
         });
 
-        return () => unsubscribe();
-    }, [currentUser.uid, currentUser.blockedUsers, fetchUserDetails, userCache, setUserCache, onFriendUidsUpdate]);
+        return () => {
+            userChatsRef.off('value', userChatsListener);
+            Object.values(chatListenersRef.current).forEach(({ ref, listener }) => ref.off('value', listener));
+            chatListenersRef.current = {};
+        };
+    }, [currentUser.uid, currentUser.blockedUsers, userCache, fetchUserDetails]);
+
 
     // Effect for presence
     useEffect(() => {
-        const participantIds = chats.map(c => c.otherParticipant.uid);
+        const participantIds = chats.map(c => Object.keys(c.participants).find(p => p !== currentUser.uid)).filter(Boolean) as string[];
         if (participantIds.length === 0) return;
-
-        const presenceRef = db.collection('presence');
-        const q = presenceRef.where(firebase.firestore.FieldPath.documentId(), 'in', [...new Set(participantIds)]);
         
-        const unsubscribe = q.onSnapshot((snapshot) => {
-            const presenceData: { [uid: string]: Presence } = {};
-            snapshot.forEach(doc => {
-                presenceData[doc.id] = doc.data() as Presence;
+        const listeners: {ref: firebase.database.Reference, listener: (a: firebase.database.DataSnapshot) => any}[] = [];
+
+        participantIds.forEach(uid => {
+            const presenceRef = db.ref(`presence/${uid}`);
+            const listener = presenceRef.on('value', (snapshot) => {
+                 if (snapshot.exists()) {
+                    setPresence(prev => ({...prev, [uid]: snapshot.val() as Presence}));
+                 }
+            }, error => {
+                console.error(`RTDB Error: Failed to listen for presence of ${uid}.`, error);
             });
-            setPresence(prev => ({...prev, ...presenceData}));
+            listeners.push({ ref: presenceRef, listener });
         });
         
-        return () => unsubscribe();
-    }, [chats]);
+        return () => {
+            listeners.forEach(({ref, listener}) => ref.off('value', listener));
+        };
+    }, [chats, currentUser.uid]);
+
+    const enrichedChats = useMemo(() => {
+       return chats
+        .map(chat => {
+            const otherId = Object.keys(chat.participants).find(p => p !== currentUser.uid);
+            if (!otherId || !userCache[otherId]) return null;
+            return {
+                ...chat,
+                otherParticipant: userCache[otherId],
+                otherParticipantPresence: presence[otherId] || { isOnline: false, lastSeen: 0 }
+            } as ChatWithDetails
+        })
+        .filter(Boolean) as ChatWithDetails[];
+    }, [chats, userCache, presence, currentUser.uid]);
+
 
     const sortedChats = useMemo(() => {
-        return [...chats]
-            .map(c => ({ ...c, otherParticipantPresence: presence[c.otherParticipant.uid] || { isOnline: false, lastSeen: null } }))
+        return [...enrichedChats]
             .sort((a, b) => {
-                const isAPinned = a.pinnedBy?.includes(currentUser.uid);
-                const isBPinned = b.pinnedBy?.includes(currentUser.uid);
+                const isAPinned = a.pinnedBy && a.pinnedBy[currentUser.uid];
+                const isBPinned = b.pinnedBy && b.pinnedBy[currentUser.uid];
                 if (isAPinned && !isBPinned) return -1;
                 if (!isAPinned && isBPinned) return 1;
-                const timeA = a.lastMessage?.timestamp?.toMillis() || a.createdAt?.toMillis() || 0;
-                const timeB = b.lastMessage?.timestamp?.toMillis() || b.createdAt?.toMillis() || 0;
+                const timeA = a.lastMessage?.timestamp || a.createdAt || 0;
+                const timeB = b.lastMessage?.timestamp || b.createdAt || 0;
                 return timeB - timeA;
             });
-    }, [chats, presence, currentUser.uid]);
+    }, [enrichedChats, currentUser.uid]);
 
     const filteredChats = useMemo(() => {
         if (!searchQuery) return sortedChats;
@@ -129,26 +201,45 @@ const HomeScreen: React.FC<HomeScreenProps> = ({ onSelectChat, currentUser, onSe
     };
 
     const handlePinChat = async (chat: ChatWithDetails) => {
-        const chatRef = db.collection('chats').doc(chat.id);
-        const isPinned = chat.pinnedBy?.includes(currentUser.uid);
-        const updateAction = isPinned 
-            ? firebase.firestore.FieldValue.arrayRemove(currentUser.uid)
-            : firebase.firestore.FieldValue.arrayUnion(currentUser.uid);
-        await chatRef.update({ pinnedBy: updateAction });
+        try {
+            const pinRef = db.ref(`chats/${chat.id}/pinnedBy/${currentUser.uid}`);
+            const isPinned = chat.pinnedBy && chat.pinnedBy[currentUser.uid];
+            await pinRef.set(isPinned ? null : true);
+        } catch (error) {
+            console.error("RTDB Error: Failed to pin/unpin chat.", error);
+            alert("Could not update pin status. Please try again.");
+        }
     };
 
     const handleHideChat = async (chat: ChatWithDetails) => {
-        await db.collection('chats').doc(chat.id).update({ [`hiddenBy.${currentUser.uid}`]: true });
+        try {
+            await db.ref(`chats/${chat.id}/hiddenBy/${currentUser.uid}`).set(true);
+        } catch (error) {
+            console.error("RTDB Error: Failed to hide chat.", error);
+            alert("Could not hide chat. Please try again.");
+        }
     };
 
     const handleDeleteChat = async (chat: ChatWithDetails) => {
-        if(window.confirm(`Delete chat with ${chat.otherParticipant.name}?`)){
-             await db.collection('chats').doc(chat.id).delete();
+        const displayName = currentUser.nicknames?.[chat.otherParticipant.uid] || chat.otherParticipant.name;
+        if(window.confirm(`Delete chat with ${displayName}? This cannot be undone.`)){
+            try {
+                const updates: { [key: string]: null } = {};
+                updates[`/chats/${chat.id}`] = null;
+                updates[`/messages/${chat.id}`] = null;
+                Object.keys(chat.participants).forEach(uid => {
+                    updates[`/userChats/${uid}/${chat.id}`] = null;
+                });
+                await db.ref().update(updates);
+            } catch (error) {
+                console.error("RTDB Error: Failed to delete chat.", error);
+                alert("Could not delete chat. Please try again.");
+            }
         }
     };
 
     const contextMenuOptions = contextMenuChat ? [
-        { label: (contextMenuChat.pinnedBy?.includes(currentUser.uid)) ? 'Unpin' : 'Pin', icon: Pin, onClick: () => handlePinChat(contextMenuChat) },
+        { label: (contextMenuChat.pinnedBy && contextMenuChat.pinnedBy[currentUser.uid]) ? 'Unpin' : 'Pin', icon: Pin, onClick: () => handlePinChat(contextMenuChat) },
         { label: 'Hide', icon: EyeOff, onClick: () => handleHideChat(contextMenuChat) },
         { label: 'Delete', icon: Trash, onClick: () => handleDeleteChat(contextMenuChat), isDestructive: true },
     ] : [];
@@ -198,7 +289,7 @@ const HomeScreen: React.FC<HomeScreenProps> = ({ onSelectChat, currentUser, onSe
                     key={chat.id} chat={chat} currentUserId={currentUser.uid}
                     onClick={() => onSelectChat(chat)} 
                     onContextMenu={handleContextMenu}
-                    isPinned={chat.pinnedBy?.includes(currentUser.uid) || false}
+                    isPinned={!!(chat.pinnedBy && chat.pinnedBy[currentUser.uid])}
                     nickname={currentUser.nicknames?.[chat.otherParticipant.uid]}
                 />
             ))

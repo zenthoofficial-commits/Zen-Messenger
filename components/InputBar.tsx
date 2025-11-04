@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Mic, Paperclip, Send, ArrowLeft } from 'lucide-react';
-import { motion } from 'framer-motion';
+import { Mic, Paperclip, Send, ArrowLeft, Image, MapPin } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
+import PermissionModal from './PermissionModal';
 
 
 interface InputBarProps {
@@ -8,10 +9,11 @@ interface InputBarProps {
   onSendAudio: (audioBlob: Blob) => void;
   onSendMedia: (file: File) => void;
   onTyping: (isTyping: boolean) => void;
+  onSendLocation: () => void;
   disabled?: boolean;
 }
 
-const InputBar: React.FC<InputBarProps> = ({ onSendMessage, onSendAudio, onSendMedia, onTyping, disabled = false }) => {
+const InputBar: React.FC<InputBarProps> = ({ onSendMessage, onSendAudio, onSendMedia, onTyping, onSendLocation, disabled = false }) => {
   const [text, setText] = useState('');
   const [isRecording, setIsRecording] = useState(false);
   const [shouldCancel, setShouldCancel] = useState(false);
@@ -22,6 +24,8 @@ const InputBar: React.FC<InputBarProps> = ({ onSendMessage, onSendAudio, onSendM
   const audioChunksRef = useRef<Blob[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [isAttachmentMenuOpen, setIsAttachmentMenuOpen] = useState(false);
+  const [isPermissionModalOpen, setIsPermissionModalOpen] = useState(false);
 
   useEffect(() => {
     onTyping(text.length > 0);
@@ -80,20 +84,30 @@ const InputBar: React.FC<InputBarProps> = ({ onSendMessage, onSendAudio, onSendM
     setIsRecording(true);
   }
 
-  const handleMicPress = (e: React.TouchEvent | React.MouseEvent) => {
+  const handleMicPress = async (e: React.TouchEvent | React.MouseEvent) => {
     if (disabled) return;
-    navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
-        startX.current = 'touches' in e ? e.touches[0].clientX : e.clientX;
-        recordingTimer.current = window.setTimeout(() => {
-            startRecording(stream);
-            if ('touches' in e) {
-                window.addEventListener('touchmove', handleTouchMove);
-            }
-        }, 200);
-    }).catch(err => {
-        console.error("Mic permission error:", err);
-        alert("Microphone access denied. Please allow microphone access in your browser settings.");
-    });
+
+    try {
+      if (navigator.permissions) {
+        const permissionStatus = await navigator.permissions.query({ name: 'microphone' as PermissionName });
+        if (permissionStatus.state === 'denied') {
+          setIsPermissionModalOpen(true);
+          return;
+        }
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      startX.current = 'touches' in e ? e.touches[0].clientX : e.clientX;
+      recordingTimer.current = window.setTimeout(() => {
+        startRecording(stream);
+        if ('touches' in e) {
+          window.addEventListener('touchmove', handleTouchMove);
+        }
+      }, 200);
+    } catch (err) {
+      console.error("Mic permission error:", err);
+      setIsPermissionModalOpen(true);
+    }
   };
 
   const handleMicRelease = () => {
@@ -113,17 +127,21 @@ const InputBar: React.FC<InputBarProps> = ({ onSendMessage, onSendAudio, onSendM
     }
   };
   
-  const handleAttachmentClick = () => {
-    if (disabled) return;
-    fileInputRef.current?.click();
-  };
-  
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
       onSendMedia(file);
     }
     e.target.value = '';
+  };
+
+  const handleAttachmentMenu = (type: 'media' | 'location') => {
+    setIsAttachmentMenuOpen(false);
+    if (type === 'media') {
+      fileInputRef.current?.click();
+    } else if (type === 'location') {
+      onSendLocation();
+    }
   };
 
 
@@ -151,7 +169,33 @@ const InputBar: React.FC<InputBarProps> = ({ onSendMessage, onSendAudio, onSendM
   }
 
   return (
-    <div className={`p-2 bg-base-tan dark:bg-gray-900 transition-opacity ${disabled ? 'opacity-50' : 'opacity-100'}`}>
+    <div className={`relative p-2 bg-base-tan dark:bg-gray-900 transition-opacity ${disabled ? 'opacity-50' : 'opacity-100'}`}>
+      <PermissionModal 
+        isOpen={isPermissionModalOpen}
+        onClose={() => setIsPermissionModalOpen(false)}
+        permissionName="microphone"
+        featureName="voice messages"
+      />
+      <AnimatePresence>
+        {isAttachmentMenuOpen && (
+          <motion.div
+            initial={{ opacity: 0, y: 10, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 10, scale: 0.95 }}
+            transition={{ duration: 0.2, ease: 'easeOut' }}
+            className="absolute bottom-20 left-2 w-56 flex flex-col gap-1 bg-secondary-cream/95 dark:bg-gray-800/95 backdrop-blur-sm p-2 rounded-xl shadow-lg z-10"
+          >
+            <button onClick={() => handleAttachmentMenu('media')} className="flex items-center gap-3 p-2 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 w-full text-left">
+              <Image size={20} className="text-accent-brand" />
+              <span className="font-semibold text-text-primary dark:text-gray-200">Image or Video</span>
+            </button>
+            <button onClick={() => handleAttachmentMenu('location')} className="flex items-center gap-3 p-2 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 w-full text-left">
+              <MapPin size={20} className="text-accent-brand" />
+              <span className="font-semibold text-text-primary dark:text-gray-200">Location</span>
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
       <div className="bg-secondary-cream dark:bg-gray-800 rounded-xl flex items-end p-2 shadow-sm gap-2">
         <input 
             type="file" 
@@ -161,13 +205,14 @@ const InputBar: React.FC<InputBarProps> = ({ onSendMessage, onSendAudio, onSendM
             accept="image/*,video/*"
             disabled={disabled}
         />
-        <button onClick={handleAttachmentClick} disabled={disabled} className="w-10 h-10 flex-shrink-0 flex items-center justify-center text-accent-brand rounded-full hover:bg-accent-brand/10 transition-colors self-end disabled:cursor-not-allowed">
+        <button onClick={() => setIsAttachmentMenuOpen(prev => !prev)} disabled={disabled} className="w-10 h-10 flex-shrink-0 flex items-center justify-center text-accent-brand rounded-full hover:bg-accent-brand/10 transition-colors self-end disabled:cursor-not-allowed">
           <Paperclip size={22} />
         </button>
         <textarea
           ref={textareaRef}
           value={text}
           onChange={handleTextChange}
+          onFocus={() => setIsAttachmentMenuOpen(false)}
           onBlur={() => onTyping(false)}
           placeholder="Message"
           rows={1}

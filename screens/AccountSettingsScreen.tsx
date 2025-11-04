@@ -36,7 +36,7 @@ const AccountSettingsScreen: React.FC<AccountSettingsScreenProps> = ({ currentUs
     }
 
     try {
-      await db.collection('users').doc(currentUser.uid).update({
+      await db.ref(`users/${currentUser.uid}`).update({
         name: name.trim(),
         name_lowercase: name.trim().toLowerCase(),
         birthday,
@@ -45,7 +45,7 @@ const AccountSettingsScreen: React.FC<AccountSettingsScreenProps> = ({ currentUs
       setSuccess(true);
       setTimeout(() => setSuccess(false), 2000);
     } catch (err) {
-      console.error(err);
+      console.error("RTDB Error: Failed to save account settings.", err);
       setError('Failed to save changes. Please try again.');
     } finally {
       setIsSaving(false);

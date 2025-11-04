@@ -3,7 +3,8 @@ import { ArrowLeft, Palette, Moon, Sun, Droplets, Image as ImageIcon, Check, Loa
 import { Theme } from '../App';
 import { ACCENT_COLORS } from '../constants';
 import { User } from '../types';
-import { db } from '../firebase';
+import { db, storage } from '../firebase';
+import { compressImage } from '../utils/media';
 
 interface AppearanceSettingsScreenProps {
   onBack: () => void;
@@ -32,47 +33,47 @@ const AppearanceSettingsScreen: React.FC<AppearanceSettingsScreenProps> = ({ onB
   const bgFileInputRef = useRef<HTMLInputElement>(null);
 
   const handleAccentColorChange = async (colorName: string) => {
-    setAccentColorName(colorName);
+    const oldColor = accentColorName;
+    setAccentColorName(colorName); // Optimistic update
     try {
-        await db.collection('users').doc(currentUser.uid).update({ accentColor: colorName });
+        await db.ref(`users/${currentUser.uid}`).update({ accentColor: colorName });
     } catch (error) {
-        console.error("Failed to save accent color", error);
-        // Optional: revert state or show error
+        console.error("RTDB Error: Failed to save accent color", error);
+        setAccentColorName(oldColor); // Revert on error
+        alert("Could not save accent color. Please try again.");
     }
   };
 
-  const handleBgFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleBgFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
     setIsBgUploading(true);
-    const reader = new FileReader();
-    reader.readAsDataURL(file);
-    reader.onloadend = async () => {
-      const dataUrl = reader.result as string;
-      try {
-        await db.collection('users').doc(currentUser.uid).update({ chatBackgroundImageUrl: dataUrl });
-      } catch (error) {
-        console.error("Failed to upload chat background", error);
+    try {
+        const compressedFile = await compressImage(file, 0.8, 1920); // Quality 0.8, max dimension 1920px
+        const filePath = `backgrounds/${currentUser.uid}/${Date.now()}_${file.name}`;
+        const storageRef = storage.ref(filePath);
+        const uploadTaskSnapshot = await storageRef.put(compressedFile);
+        const downloadURL = await uploadTaskSnapshot.ref.getDownloadURL();
+
+        await db.ref(`users/${currentUser.uid}`).update({ chatBackgroundImageUrl: downloadURL });
+    } catch (error) {
+        console.error("RTDB/Storage Error: Failed to upload chat background", error);
         alert("Error: Could not save background image.");
-      } finally {
+    } finally {
         setIsBgUploading(false);
-      }
-    };
-    reader.onerror = () => {
-      alert("Error: Could not read file.");
-      setIsBgUploading(false);
     }
+    if (e.target) e.target.value = '';
   };
 
   const handleRemoveBg = async () => {
     if (window.confirm("Are you sure you want to remove your custom chat background?")) {
       try {
-        await db.collection('users').doc(currentUser.uid).update({
+        await db.ref(`users/${currentUser.uid}`).update({
           chatBackgroundImageUrl: ''
         });
       } catch (error) {
-        console.error("Failed to remove chat background", error);
+        console.error("RTDB Error: Failed to remove chat background", error);
         alert("Error: Could not remove background.");
       }
     }

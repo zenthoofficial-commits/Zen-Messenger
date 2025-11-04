@@ -1,6 +1,6 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { Message, User } from '../types';
-import { Check, CheckCheck, PlayCircle, CheckSquare } from 'lucide-react';
+import { Check, CheckCheck, PlayCircle, CheckSquare, Loader2, Phone, Video } from 'lucide-react';
 import { format } from 'date-fns';
 import { motion, useAnimation } from 'framer-motion';
 
@@ -17,6 +17,7 @@ interface ChatBubbleProps {
   isSelected: boolean;
   userCache: { [uid: string]: User };
   id: string;
+  translation?: { text: string; isLoading: boolean };
 }
 
 const ReactionTooltip: React.FC<{ uids: string[], userCache: { [uid: string]: User } }> = ({ uids, userCache }) => {
@@ -28,8 +29,22 @@ const ReactionTooltip: React.FC<{ uids: string[], userCache: { [uid: string]: Us
     );
 };
 
+const linkify = (text: string) => {
+  const urlRegex = /(\b(https?|ftp|file):\/\/[-A-Z0-9+&@#\/%?=~_|!:,.;]*[-A-Z0-9+&@#\/%=~_|])/ig;
+  if (!text) return text;
 
-const ChatBubble: React.FC<ChatBubbleProps> = ({ message, currentUser, otherParticipant, onContextMenu, onAddReaction, onReply, onMediaClick, userCache, id, selectionMode, isSelected, onToggleSelection }) => {
+  const parts = text.split(urlRegex);
+
+  return parts.map((part, i) => {
+    if (i % 3 === 1) { // The URL part
+      return <a key={i} href={part} target="_blank" rel="noopener noreferrer" className="text-accent-brand underline hover:opacity-80">{part}</a>;
+    }
+    return part;
+  });
+};
+
+
+const ChatBubble: React.FC<ChatBubbleProps> = ({ message, currentUser, otherParticipant, onContextMenu, onAddReaction, onReply, onMediaClick, userCache, id, selectionMode, isSelected, onToggleSelection, translation }) => {
   const isSent = message.senderId === currentUser.uid;
   const [visibleTooltip, setVisibleTooltip] = useState<string | null>(null);
   const tooltipTimeoutRef = useRef<number | null>(null);
@@ -47,12 +62,27 @@ const ChatBubble: React.FC<ChatBubbleProps> = ({ message, currentUser, otherPart
         }
     };
   }, []);
+  
+  if (message.isSystemMessage) {
+    const isVideoCall = message.text.toLowerCase().includes('video');
+    const Icon = isVideoCall ? Video : Phone;
+    return (
+      <div id={id} className="w-full flex justify-center my-2">
+        <div className="bg-black/10 dark:bg-white/10 text-text-primary/80 dark:text-gray-300 text-xs font-semibold px-3 py-1.5 rounded-full flex items-center gap-2">
+          <Icon size={14} className={message.text.toLowerCase().includes('missed') ? 'text-red-500' : 'text-text-primary/60 dark:text-gray-400'} />
+          <span>{message.text}</span>
+          <span className="text-text-primary/50 dark:text-gray-500">{message.timestamp ? format(new Date(message.timestamp), 'p') : ''}</span>
+        </div>
+      </div>
+    );
+  }
 
-  const isReadByOther = message.readBy?.includes(otherParticipant.uid);
+  const isReadByOther = message.readBy && message.readBy[otherParticipant.uid];
+  const readByCount = message.readBy ? Object.keys(message.readBy).length : 0;
   const readReceipt = isSent 
       ? isReadByOther
           ? <CheckCheck size={16} className="text-accent-brand" />
-          : (message.readBy?.length > 1 ? <CheckCheck size={16} className="text-white/80 dark:text-gray-400" /> : <Check size={16} className="text-white/80 dark:text-gray-400" />)
+          : (readByCount > 1 ? <CheckCheck size={16} className="text-white/80 dark:text-gray-400" /> : <Check size={16} className="text-white/80 dark:text-gray-400" />)
       : null;
 
   const handleNativeContextMenu = (e: React.MouseEvent | React.TouchEvent) => {
@@ -68,7 +98,7 @@ const ChatBubble: React.FC<ChatBubbleProps> = ({ message, currentUser, otherPart
     }
   };
   
-  const reactionEntries = message.reactions ? Object.entries(message.reactions).filter(([, uids]) => Array.isArray(uids) && uids.length > 0) : [];
+  const reactionEntries = message.reactions ? Object.entries(message.reactions).filter(([, uids]) => uids && Object.keys(uids).length > 0) : [];
 
   const handleDragEnd = (event: MouseEvent | TouchEvent | PointerEvent, info: any) => {
     if (selectionMode) return;
@@ -114,7 +144,7 @@ const ChatBubble: React.FC<ChatBubbleProps> = ({ message, currentUser, otherPart
         case 'audio':
              return <audio controls src={message.mediaUrl} className="w-full max-w-[250px] h-10" />;
         default:
-            return <p className="text-base whitespace-pre-wrap break-words">{message.text}</p>;
+            return <p className="text-base whitespace-pre-wrap break-words">{linkify(message.text)}</p>;
     }
   };
 
@@ -154,29 +184,45 @@ const ChatBubble: React.FC<ChatBubbleProps> = ({ message, currentUser, otherPart
                         )}
                         
                         {renderMessageContent()}
+                        
+                        {translation && (
+                          <div className={`mt-2 pt-2 ${isSent ? 'border-t-white/20' : 'border-t-black/10 dark:border-t-gray-600'} border-t`}>
+                            {translation.isLoading ? (
+                              <div className="flex items-center gap-2 text-sm italic opacity-70">
+                                <Loader2 size={14} className="animate-spin" />
+                                <span>Translating...</span>
+                              </div>
+                            ) : (
+                               <p className="text-sm italic opacity-90">{translation.text}</p>
+                            )}
+                          </div>
+                        )}
                     </div>
                     
                     {reactionEntries.length > 0 && (
                       <div className={`absolute bottom-0 translate-y-1/2 flex items-center gap-1 z-10 ${isSent ? 'right-2' : 'left-2'}`}>
-                        {reactionEntries.map(([emoji, uids]) => (
-                          <div key={emoji} className="relative">
-                            <button 
-                                onClick={(e) => { e.stopPropagation(); handleReactionPillClick(emoji); }}
-                                className="bg-secondary-cream/90 dark:bg-gray-600/90 backdrop-blur-sm rounded-full px-1.5 py-0.5 text-xs flex items-center gap-1 shadow-md"
-                            >
-                                <span>{emoji}</span>
-                                {(uids as string[]).length > 1 && <span className="font-semibold text-text-primary/80 dark:text-gray-200">{(uids as string[]).length}</span>}
-                            </button>
-                            {visibleTooltip === emoji && <ReactionTooltip uids={uids as string[]} userCache={userCache}/>}
-                          </div>
-                        ))}
+                        {reactionEntries.map(([emoji, uids]) => {
+                          const uidList = Object.keys(uids);
+                          return (
+                            <div key={emoji} className="relative">
+                              <button 
+                                  onClick={(e) => { e.stopPropagation(); handleReactionPillClick(emoji); }}
+                                  className="bg-secondary-cream/90 dark:bg-gray-600/90 backdrop-blur-sm rounded-full px-1.5 py-0.5 text-xs flex items-center gap-1 shadow-md"
+                              >
+                                  <span>{emoji}</span>
+                                  {uidList.length > 1 && <span className="font-semibold text-text-primary/80 dark:text-gray-200">{uidList.length}</span>}
+                              </button>
+                              {visibleTooltip === emoji && <ReactionTooltip uids={uidList} userCache={userCache}/>}
+                            </div>
+                          )
+                        })}
                       </div>
                     )}
                 </div>
 
                 <div className={`flex items-center gap-1.5 mt-1 px-1 ${isSent ? 'self-end' : 'self-start'}`}>
                     {message.isEdited && <span className="text-xs text-text-primary/50 dark:text-gray-500">(edited)</span>}
-                    <span className="text-xs text-text-primary/50 dark:text-gray-500">{message.timestamp ? format(message.timestamp.toDate(), 'p') : '...'}</span>
+                    <span className="text-xs text-text-primary/50 dark:text-gray-500">{message.timestamp ? format(new Date(message.timestamp), 'p') : '...'}</span>
                     {readReceipt}
                 </div>
               </div>

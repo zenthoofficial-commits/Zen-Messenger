@@ -1,6 +1,6 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { Message, User } from '../types';
-import { Check, CheckCheck, PlayCircle, CheckSquare, Loader2, Phone, Video } from 'lucide-react';
+import { Check, CheckCheck, PlayCircle, CheckSquare, Loader2, Phone, Video, X } from 'lucide-react';
 import { format } from 'date-fns';
 import { motion, useAnimation } from 'framer-motion';
 
@@ -18,6 +18,7 @@ interface ChatBubbleProps {
   userCache: { [uid: string]: User };
   id: string;
   isTranslating: boolean;
+  onCancelTranslation: (messageId: string) => void;
 }
 
 const ReactionTooltip: React.FC<{ uids: string[], userCache: { [uid: string]: User } }> = ({ uids, userCache }) => {
@@ -44,7 +45,7 @@ const linkify = (text: string) => {
 };
 
 
-const ChatBubble: React.FC<ChatBubbleProps> = ({ message, currentUser, otherParticipant, onContextMenu, onAddReaction, onReply, onMediaClick, userCache, id, selectionMode, isSelected, onToggleSelection, isTranslating }) => {
+const ChatBubble: React.FC<ChatBubbleProps> = ({ message, currentUser, otherParticipant, onContextMenu, onAddReaction, onReply, onMediaClick, userCache, id, selectionMode, isSelected, onToggleSelection, isTranslating, onCancelTranslation }) => {
   const isSent = message.senderId === currentUser.uid;
   const [visibleTooltip, setVisibleTooltip] = useState<string | null>(null);
   const tooltipTimeoutRef = useRef<number | null>(null);
@@ -155,6 +156,12 @@ const ChatBubble: React.FC<ChatBubbleProps> = ({ message, currentUser, otherPart
                 )}
                 {message.translatedText && (
                     <div className="mt-2 pt-2 border-t border-white/20 dark:border-gray-500/50">
+                        <div className="flex justify-between items-center mb-1">
+                            <span className="text-xs font-semibold opacity-70">Translated</span>
+                            <button onClick={() => onCancelTranslation(message.id)} className="p-0.5 rounded-full hover:bg-black/10 dark:hover:bg-white/10">
+                                <X size={12} className="opacity-70" />
+                            </button>
+                        </div>
                         <p className="text-base whitespace-pre-wrap break-words">{message.translatedText}</p>
                     </div>
                 )}

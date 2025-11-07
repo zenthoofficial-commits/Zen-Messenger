@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { User } from '../types';
+import { User, UserProfileData } from '../types';
 import { db } from '../firebase';
 import { ArrowLeft, Loader2 } from 'lucide-react';
 import SegmentedControl from '../components/SegmentedControl';
@@ -20,6 +20,11 @@ const AccountSettingsScreen: React.FC<AccountSettingsScreenProps> = ({ currentUs
 
   const GENDER_OPTIONS = ['Male', 'Female', 'Non-binary'];
   const RELATIONSHIP_OPTIONS = ['Single', 'In a relationship'];
+  
+  // FIX: Add type-safe handler for SegmentedControl onChange prop.
+  const handleRelationshipChange = (value: string) => {
+    setRelationshipStatus(value as UserProfileData['relationshipStatus']);
+  };
 
   const handleSaveChanges = async () => {
     setIsSaving(true);
@@ -86,11 +91,11 @@ const AccountSettingsScreen: React.FC<AccountSettingsScreenProps> = ({ currentUs
           </div>
           <div>
             <label className="text-sm font-medium text-text-primary/80 dark:text-gray-300 mb-1 block">Gender</label>
-            <SegmentedControl name="gender" options={GENDER_OPTIONS} selectedValue={gender} onChange={setGender} />
+            <SegmentedControl name="gender" options={GENDER_OPTIONS} selectedValue={gender} onChange={(val) => setGender(val as UserProfileData['gender'])} />
           </div>
           <div>
             <label className="text-sm font-medium text-text-primary/80 dark:text-gray-300 mb-1 block">Relationship Status</label>
-            <SegmentedControl name="relationship" options={RELATIONSHIP_OPTIONS} selectedValue={relationshipStatus} onChange={setRelationshipStatus} />
+            <SegmentedControl name="relationship" options={RELATIONSHIP_OPTIONS} selectedValue={relationshipStatus} onChange={handleRelationshipChange} />
           </div>
         </div>
 

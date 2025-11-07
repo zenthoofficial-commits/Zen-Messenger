@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
   <head>
-    <meta charset="UTF--8" />
+    <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ZenChat</title>
@@ -55,6 +55,7 @@
         filter: grayscale(1) sepia(0.4) contrast(1.2) brightness(0.9);
       }
     </style>
+    <script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
   <script type="importmap">
 {
   "imports": {
@@ -79,6 +80,6 @@
 </head>
   <body>
     <div id="root"></div>
-    <script type="module" src="/index.tsx"></script>
+    <script type="text/babel" src="/index.tsx"></script>
   </body>
 </html>

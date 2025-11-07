@@ -45,7 +45,8 @@ const playSound = (type: 'incoming' | 'outgoing') => {
     if (!audioContext) return;
 
     const oscillator = audioContext.createOscillator();
-    const gainNode = audioContext.createGain();
+    // FIX: Cast audioContext to `any` to bypass a likely incorrect TypeScript definition for `createGain` which expects 1 argument.
+    const gainNode = (audioContext as any).createGain();
 
     oscillator.connect(gainNode);
     gainNode.connect(audioContext.destination);
@@ -513,6 +514,18 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ chat, onBack, currentUser, onSt
       }
     };
 
+    const handleCancelTranslation = (messageId: string) => {
+        setMessages(prevMessages => 
+            prevMessages.map(msg => {
+                if (msg.id === messageId) {
+                    const { translatedText, ...rest } = msg;
+                    return rest;
+                }
+                return msg;
+            })
+        );
+    };
+
   const handleReportUser = () => {
     setHeaderMenuOpen(false);
     const displayName = currentUser.nicknames?.[realtimeOtherParticipant.uid] || realtimeOtherParticipant.name;
@@ -722,6 +735,7 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ chat, onBack, currentUser, onSt
                 userCache={userCache}
                 id={`msg-${msg.id}`}
                 isTranslating={translatingMessageId === msg.id}
+                onCancelTranslation={handleCancelTranslation}
             />
             ))}
             <div ref={messagesEndRef} />

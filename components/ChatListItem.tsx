@@ -1,5 +1,6 @@
 
 
+
 import React from 'react';
 import { ChatWithDetails } from '../types';
 import Avatar from './Avatar';
@@ -13,9 +14,10 @@ interface ChatListItemProps {
   onContextMenu: (e: React.MouseEvent | React.TouchEvent, chat: ChatWithDetails) => void;
   isPinned: boolean;
   nickname?: string;
+  gender?: string;
 }
 
-const ChatListItem: React.FC<ChatListItemProps> = ({ chat, currentUserId, onClick, onContextMenu, isPinned, nickname }) => {
+const ChatListItem: React.FC<ChatListItemProps> = ({ chat, currentUserId, onClick, onContextMenu, isPinned, nickname, gender }) => {
   const { otherParticipant, lastMessage, otherParticipantPresence, unreadCount } = chat;
 
   const formatTimestamp = (timestamp: any) => {
@@ -42,7 +44,7 @@ const ChatListItem: React.FC<ChatListItemProps> = ({ chat, currentUserId, onClic
       onClick={onClick}
       onContextMenu={handleNativeContextMenu}
     >
-      <Avatar src={otherParticipant.avatarUrl || `https://picsum.photos/seed/${otherParticipant.uid}/100/100`} alt={displayName} isOnline={otherParticipantPresence?.isOnline} size="md"/>
+      <Avatar src={otherParticipant.avatarUrl || `https://picsum.photos/seed/${otherParticipant.uid}/100/100`} alt={displayName} isOnline={otherParticipantPresence?.isOnline} size="md" gender={gender}/>
       <div className="flex-1 ml-4 overflow-hidden">
         <div className="flex justify-between items-center">
           <div className="flex items-center gap-2">

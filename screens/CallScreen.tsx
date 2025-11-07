@@ -25,11 +25,20 @@ const CallScreen: React.FC<CallScreenProps> = ({ call, currentUser, onAnswer, on
     const [permissionError, setPermissionError] = useState<{name: 'camera' | 'microphone' | 'camera & microphone', feature: string} | null>(null);
     const [isBeautyEffectOn, setIsBeautyEffectOn] = useState(true);
     const [isVintageEffectOn, setIsVintageEffectOn] = useState(false);
+    const [isReadyToAnswer, setIsReadyToAnswer] = useState(false);
+    const isSettingAnswer = useRef(false);
 
     const pc = useRef<RTCPeerConnection | null>(null);
     const localVideoRef = useRef<HTMLVideoElement>(null);
     const remoteVideoRef = useRef<HTMLVideoElement>(null);
-    const isNegotiating = useRef(false);
+    const canvasRef = useRef<HTMLCanvasElement>(null);
+    const videoProcessorRef = useRef<{
+        videoEl: HTMLVideoElement,
+        animationFrameId: number | null,
+        originalTrack: MediaStreamTrack | null,
+        processedStream: MediaStream | null,
+    }>({ videoEl: document.createElement('video'), animationFrameId: null, originalTrack: null, processedStream: null });
+
 
     const incomingRingtoneContextRef = useRef<AudioContext | null>(null);
     const incomingRingtoneIntervalRef = useRef<number | null>(null);
@@ -41,6 +50,7 @@ const CallScreen: React.FC<CallScreenProps> = ({ call, currentUser, onAnswer, on
         name: isCaller ? call.calleeName : call.callerName,
         avatarUrl: isCaller ? call.calleeAvatar : call.callerAvatar,
         uid: isCaller ? call.calleeId : call.callerId,
+        gender: isCaller ? call.calleeGender : call.callerGender
     };
     
     const formatDuration = (seconds: number) => `${Math.floor(seconds / 60).toString().padStart(2, '0')}:${(seconds % 60).toString().padStart(2, '0')}`;
@@ -146,7 +156,7 @@ const CallScreen: React.FC<CallScreenProps> = ({ call, currentUser, onAnswer, on
             };
             const constraints = {
                 video: video 
-                    ? { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } } 
+                    ? { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 24 } } 
                     : false,
                 audio: audioConstraints,
             };
@@ -166,47 +176,14 @@ const CallScreen: React.FC<CallScreenProps> = ({ call, currentUser, onAnswer, on
             return null;
         }
     }, [call.type]);
-
-    // Get user media for the caller on mount
-    useEffect(() => {
-        if (!isCaller) return;
-        const getCallerMedia = async () => {
-            const stream = await getMedia();
-            if (!stream) {
-                onEnd();
-            }
-        };
-        getCallerMedia();
-    }, [isCaller, getMedia, onEnd]);
     
-    // WebRTC Initialization and Signaling
+    // Effect 1: Create and destroy the Peer Connection. Runs only when the call ID changes.
     useEffect(() => {
         const servers = { iceServers: [{ urls: ['stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302'] }] };
-        pc.current = new RTCPeerConnection(servers);
-        isNegotiating.current = false;
+        const peer = new RTCPeerConnection(servers);
+        pc.current = peer;
 
-        pc.current.onnegotiationneeded = async () => {
-            if (isNegotiating.current) return;
-            isNegotiating.current = true;
-            try {
-                // To avoid glare, only the caller is responsible for creating offers.
-                if (isCaller) {
-                    const offer = await pc.current.createOffer();
-                    await pc.current.setLocalDescription(offer);
-                    db.ref(`calls/${call.id}`).update({ offer: pc.current.localDescription?.toJSON() });
-                }
-            } catch (error) {
-                console.error("WebRTC Error: onnegotiationneeded failed.", error);
-            } finally {
-                isNegotiating.current = false;
-            }
-        };
-
-        const callRef = db.ref(`calls/${call.id}`);
-        const callerCandidatesRef = callRef.child('callerCandidates');
-        const calleeCandidatesRef = callRef.child('calleeCandidates');
-        
-        pc.current.ontrack = event => {
+        peer.ontrack = event => {
             if (event.streams && event.streams[0]) {
                 setRemoteStream(event.streams[0]);
                 if (remoteVideoRef.current) {
@@ -215,69 +192,173 @@ const CallScreen: React.FC<CallScreenProps> = ({ call, currentUser, onAnswer, on
             }
         };
 
-        pc.current.onicecandidate = event => {
+        return () => {
+            if (peer) {
+                peer.close();
+            }
+            if (pc.current) {
+                pc.current = null;
+            }
+        };
+    }, [call.id]);
+    
+    // Effect 2: Handle signaling (offer, answer, candidates).
+    useEffect(() => {
+        const peer = pc.current;
+        if (!peer) return;
+
+        const callRef = db.ref(`calls/${call.id}`);
+        const callerCandidatesRef = callRef.child('callerCandidates');
+        const calleeCandidatesRef = callRef.child('calleeCandidates');
+
+        peer.onicecandidate = event => {
             if (event.candidate) {
                 const ref = isCaller ? callerCandidatesRef : calleeCandidatesRef;
                 ref.push().set(event.candidate.toJSON());
             }
         };
 
-        const remoteCandidatesRef = isCaller ? calleeCandidatesRef : callerCandidatesRef;
-        const candidateListener = remoteCandidatesRef.on('child_added', async snapshot => {
-            try {
-                if (snapshot.exists()) {
-                    await pc.current?.addIceCandidate(new RTCIceCandidate(snapshot.val()));
-                }
-            } catch (error) {
-                console.error("WebRTC Error: Failed to add ICE candidate.", error);
-            }
-        });
-
         const callListener = callRef.on('value', async (snapshot) => {
             const data = snapshot.val() as Call;
-            if (!data || !pc.current) return;
+            if (!data) return;
 
-            const newOffer = data.offer;
-            const currentRemoteDesc = pc.current.remoteDescription;
-            if (newOffer && (!currentRemoteDesc || newOffer.sdp !== currentRemoteDesc.sdp)) {
+            // Callee receives offer
+            if (data.offer && peer.signalingState === 'stable' && !isCaller) {
                 try {
-                    await pc.current.setRemoteDescription(new RTCSessionDescription(newOffer));
-                    if (!isCaller && pc.current.signalingState === 'have-remote-offer') {
-                        const answer = await pc.current.createAnswer();
-                        await pc.current.setLocalDescription(answer);
-                        await db.ref(`calls/${call.id}`).update({ answer: pc.current.localDescription.toJSON() });
-                    }
-                } catch (e) { console.error("WebRTC Error: Failed to handle new offer.", e); }
+                    await peer.setRemoteDescription(new RTCSessionDescription(data.offer));
+                    setIsReadyToAnswer(true);
+                } catch (e) {
+                    console.error("Error setting remote description from offer", e);
+                }
             }
-            
-            const newAnswer = data.answer;
-             if (isCaller && newAnswer && pc.current.signalingState === 'have-local-offer') {
+
+            // Caller receives answer
+            // FIX: Use a ref as a lock to prevent race conditions from rapid Firebase updates.
+            if (data.answer && !peer.currentRemoteDescription && !isSettingAnswer.current) {
+                isSettingAnswer.current = true;
                 try {
-                    await pc.current.setRemoteDescription(new RTCSessionDescription(newAnswer));
-                } catch (e) { console.error("WebRTC Error: Failed to set remote description on caller.", e); }
+                    await peer.setRemoteDescription(new RTCSessionDescription(data.answer));
+                } catch (e) {
+                    console.error("Error setting remote description from answer", e);
+                }
             }
         });
 
-        return () => {
-            remoteCandidatesRef.off('child_added', candidateListener);
-            callRef.off('value', callListener);
-            pc.current?.close();
-            pc.current = null;
-        };
-    }, [call.id, isCaller]);
+        const remoteCandidatesRef = isCaller ? calleeCandidatesRef : callerCandidatesRef;
+        const candidateListener = remoteCandidatesRef.on('child_added', snapshot => {
+            if (snapshot.exists()) {
+                peer.addIceCandidate(new RTCIceCandidate(snapshot.val())).catch(e => console.error("Error adding ICE candidate", e));
+            }
+        });
 
+        const startCall = async () => {
+            const stream = await getMedia();
+            if (stream && pc.current) {
+                stream.getTracks().forEach(track => {
+                    pc.current?.addTrack(track, stream);
+                });
 
-    // Add local stream tracks
-    useEffect(() => {
-        if (localStream && pc.current) {
-             const existingTracks = pc.current.getSenders().map(s => s.track);
-             localStream.getTracks().forEach(track => {
-                if(!existingTracks.includes(track)) {
-                    pc.current?.addTrack(track, localStream);
+                if (isCaller) {
+                    const offer = await pc.current.createOffer();
+                    await pc.current.setLocalDescription(offer);
+                    callRef.update({ offer: pc.current.localDescription?.toJSON() });
                 }
-            });
+            } else if (!stream) {
+                onEnd();
+            }
+        };
+        
+        if (isCaller) {
+            startCall();
         }
-    }, [localStream]);
+
+        return () => {
+            callRef.off('value', callListener);
+            remoteCandidatesRef.off('child_added', candidateListener);
+        };
+    }, [call.id, isCaller, getMedia, onEnd]);
+
+    // Effect 3: Video processing for effects
+    useEffect(() => {
+        const peer = pc.current;
+        const videoSender = peer?.getSenders().find(s => s.track?.kind === 'video');
+        const canvas = canvasRef.current;
+        const processor = videoProcessorRef.current;
+    
+        const cleanup = () => {
+            if (processor.animationFrameId) {
+                cancelAnimationFrame(processor.animationFrameId);
+                processor.animationFrameId = null;
+            }
+            if (!processor.videoEl.paused) {
+                 processor.videoEl.pause();
+            }
+            // Restore original track if it exists and is different
+            if (peer && peer.connectionState !== 'closed' && videoSender && processor.originalTrack && videoSender.track !== processor.originalTrack) {
+                videoSender.replaceTrack(processor.originalTrack).catch(e => {
+                    if (e.name !== 'InvalidStateError') { // Ignore error if connection is already closed
+                        console.warn("Error replacing track back to original", e);
+                    }
+                });
+            }
+        };
+    
+        if (!localStream || !videoSender || !canvas) {
+            cleanup();
+            return;
+        }
+    
+        if (!processor.originalTrack) {
+            processor.originalTrack = videoSender.track;
+        }
+        const originalTrack = processor.originalTrack;
+        if (!originalTrack) return;
+    
+        const areEffectsOn = isBeautyEffectOn || isVintageEffectOn;
+    
+        if (!areEffectsOn) {
+            cleanup();
+            return;
+        }
+    
+        processor.videoEl.srcObject = new MediaStream([originalTrack]);
+        processor.videoEl.play().catch(e => console.error("Hidden video element failed to play", e));
+    
+        const drawFrame = () => {
+            const settings = originalTrack.getSettings();
+            const originalWidth = settings.width || 640;
+            const originalHeight = settings.height || 480;
+            const aspectRatio = originalWidth / originalHeight;
+            
+            const targetWidth = 480;
+            const targetHeight = Math.round(targetWidth / aspectRatio);
+
+            if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
+                canvas.width = targetWidth;
+                canvas.height = targetHeight;
+            }
+            
+            const ctx = canvas.getContext('2d');
+            if (ctx) {
+                let filters = [];
+                if (isBeautyEffectOn) filters.push('brightness(1.1) contrast(0.95) saturate(1.2) blur(0.5px)'); // Smoother skin effect to hide blemishes
+                if (isVintageEffectOn) filters.push('grayscale(1) sepia(0.4) contrast(1.2) brightness(0.9)');
+                ctx.filter = filters.join(' ');
+                ctx.drawImage(processor.videoEl, 0, 0, canvas.width, canvas.height);
+            }
+            processor.animationFrameId = requestAnimationFrame(drawFrame);
+        };
+        drawFrame();
+    
+        const processedStream = canvas.captureStream(24);
+        const processedTrack = processedStream.getVideoTracks()[0];
+        if (processedTrack && videoSender.track !== processedTrack) {
+            videoSender.replaceTrack(processedTrack).catch(e => console.error("Error replacing track with processed track", e));
+        }
+    
+        return cleanup;
+    }, [localStream, isBeautyEffectOn, isVintageEffectOn]);
+
 
     const sendSystemMessage = useCallback(async (text: string) => {
         if (!call.chatId) return;
@@ -298,34 +379,63 @@ const CallScreen: React.FC<CallScreenProps> = ({ call, currentUser, onAnswer, on
     }, [call.chatId]);
 
     const handleAnswer = useCallback(async () => {
+        const peer = pc.current;
+        if (!peer || !isReadyToAnswer) {
+            console.error("Cannot answer, peer connection not ready or no offer received.");
+            return;
+        }
+
         const stream = await getMedia(call.type === 'video');
         if (!stream) {
             onDecline();
             return;
         }
-        onAnswer();
-    }, [call.type, onAnswer, getMedia, onDecline]);
+        
+        stream.getTracks().forEach(track => {
+            const sender = peer.getSenders().find(s => s.track?.kind === track.kind);
+            if (sender) {
+                sender.replaceTrack(track);
+            } else {
+                peer.addTrack(track, stream);
+            }
+        });
+        
+        try {
+            const answer = await peer.createAnswer();
+            await peer.setLocalDescription(answer);
+            await db.ref(`calls/${call.id}`).update({ answer: peer.localDescription?.toJSON() });
+            onAnswer(); // This updates status to 'connected'
+        } catch (error) {
+            console.error("Failed to create or send answer", error);
+            onDecline();
+        }
+    }, [call.id, call.type, getMedia, onAnswer, onDecline, isReadyToAnswer]);
 
     const handleToggleCamera = useCallback(async () => {
         const turningOn = isCameraOff;
         
         if (turningOn) {
             try {
-                const videoStream = await navigator.mediaDevices.getUserMedia({ video: { width: 1920, height: 1080 } });
+                const videoStream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
                 const videoTrack = videoStream.getVideoTracks()[0];
                 
+                const sender = pc.current?.getSenders().find(s => s.track?.kind === 'video');
+                if (sender) {
+                    sender.replaceTrack(videoTrack);
+                    videoProcessorRef.current.originalTrack = videoTrack; // Update original track for processor
+                } else if (localStream) {
+                    pc.current?.addTrack(videoTrack, localStream);
+                }
+
                 setLocalStream(prevStream => {
-                    const newStream = prevStream ? prevStream : new MediaStream();
+                    const newStream = prevStream ? new MediaStream(prevStream.getAudioTracks()) : new MediaStream();
                     newStream.addTrack(videoTrack);
                     if (localVideoRef.current) localVideoRef.current.srcObject = newStream;
                     return newStream;
                 });
 
-                // Add track to peer connection, which will trigger renegotiation
-                pc.current?.addTrack(videoTrack, localStream!);
                 setIsCameraOff(false);
 
-                // If upgrading from audio, update call type in DB
                 if (call.type === 'audio') {
                     db.ref(`calls/${call.id}`).update({ type: 'video' });
                 }
@@ -338,12 +448,9 @@ const CallScreen: React.FC<CallScreenProps> = ({ call, currentUser, onAnswer, on
         } else {
             if (localStream) {
                 localStream.getVideoTracks().forEach(track => {
-                    track.stop();
-                    localStream.removeTrack(track);
-                    const sender = pc.current?.getSenders().find(s => s.track === track);
-                    if(sender) pc.current?.removeTrack(sender);
+                    track.enabled = false;
+                    track.stop(); // Stop the track to turn off the camera light
                 });
-                setLocalStream(new MediaStream(localStream.getAudioTracks()));
                 setIsCameraOff(true);
             }
         }
@@ -371,17 +478,22 @@ const CallScreen: React.FC<CallScreenProps> = ({ call, currentUser, onAnswer, on
         return () => { if (interval) clearInterval(interval); };
     }, [call.status, stopIncomingRingtone, stopOutgoingRingtone]);
     
-    useEffect(() => {
-      return () => {
+    const cleanupStreams = useCallback(() => {
         if (localStream) localStream.getTracks().forEach(track => track.stop());
         if (remoteStream) remoteStream.getTracks().forEach(track => track.stop());
-      }
+        setLocalStream(null);
+        setRemoteStream(null);
     }, [localStream, remoteStream]);
     
-    const getStatusText = () => call.status === 'connected' ? formatDuration(callDuration) : (isCaller ? 'Ringing...' : 'Incoming Call...');
+    const getStatusText = () => {
+        if (call.status === 'connected') return formatDuration(callDuration);
+        const callTypeString = call.type === 'video' ? 'Video' : 'Audio';
+        return isCaller ? 'Ringing...' : `Incoming ${callTypeString} Call...`;
+    };
 
     const handleDeclineCall = async () => {
         await sendSystemMessage(`Missed ${call.type} call`);
+        cleanupStreams();
         onDecline();
     };
 
@@ -391,6 +503,7 @@ const CallScreen: React.FC<CallScreenProps> = ({ call, currentUser, onAnswer, on
         } else if (call.status === 'ringing') {
              await sendSystemMessage(`Missed ${call.type} call`);
         }
+        cleanupStreams();
         onEnd();
     };
 
@@ -402,8 +515,8 @@ const CallScreen: React.FC<CallScreenProps> = ({ call, currentUser, onAnswer, on
                         <div className="w-16 h-16 rounded-full bg-red-500 text-white flex items-center justify-center"><Phone size={28} className="transform -rotate-[135deg]" /></div>
                         <span>Decline</span>
                     </button>
-                    <button onClick={handleAnswer} className="flex flex-col items-center gap-2 text-white/90">
-                        <div className="w-16 h-16 rounded-full bg-accent-green text-white flex items-center justify-center"><Phone size={28} /></div>
+                    <button onClick={handleAnswer} disabled={!isReadyToAnswer} className="flex flex-col items-center gap-2 text-white/90 disabled:opacity-60 disabled:cursor-not-allowed group">
+                        <div className="w-16 h-16 rounded-full bg-accent-green text-white flex items-center justify-center transition-colors group-disabled:bg-gray-600"><Phone size={28} /></div>
                         <span>Answer</span>
                     </button>
                 </div>
@@ -422,7 +535,9 @@ const CallScreen: React.FC<CallScreenProps> = ({ call, currentUser, onAnswer, on
                     </button>
                 )}
                 <button onClick={() => setIsMuted(!isMuted)} className={`w-14 h-14 rounded-full flex items-center justify-center transition-all ${isMuted ? 'bg-white text-black' : 'bg-white/20 text-white'}`}>{ isMuted ? <MicOff size={24}/> : <Mic size={24}/>}</button>
-                <button onClick={handleToggleCamera} className={`w-14 h-14 rounded-full flex items-center justify-center transition-colors ${isCameraOff ? 'bg-white text-black' : 'bg-white/20 text-white'}`}>{isCameraOff ? <VideoOff size={24} /> : <Video size={24} />}</button>
+                {call.type === 'video' &&
+                    <button onClick={handleToggleCamera} className={`w-14 h-14 rounded-full flex items-center justify-center transition-colors ${isCameraOff ? 'bg-white text-black' : 'bg-white/20 text-white'}`}>{isCameraOff ? <VideoOff size={24} /> : <Video size={24} />}</button>
+                }
                 <button onClick={handleEndCall} className="w-16 h-16 rounded-full bg-red-500 text-white flex items-center justify-center"><Phone size={28} className="transform -rotate-[135deg]" /></button>
             </div>
         );
@@ -439,6 +554,7 @@ const CallScreen: React.FC<CallScreenProps> = ({ call, currentUser, onAnswer, on
 
     return (
         <div className="absolute inset-0 bg-gray-800 z-50 flex flex-col items-center justify-between p-8 text-white">
+            <canvas ref={canvasRef} className="hidden"></canvas>
             {permissionError && (
                 <PermissionModal 
                     isOpen={isPermissionModalOpen}
@@ -454,12 +570,17 @@ const CallScreen: React.FC<CallScreenProps> = ({ call, currentUser, onAnswer, on
             </div>
             
             <div className={`flex-1 flex flex-col items-center justify-center text-center transition-opacity duration-500 ${showCenteredInfo ? 'opacity-100' : 'opacity-0'}`}>
-                <Avatar src={otherUser.avatarUrl || `https://picsum.photos/seed/${otherUser.uid}/100/100`} alt={otherUser.name} size="lg" />
+                {call.status === 'ringing' && !isCaller && (
+                    <div className="mb-4 p-3 bg-white/10 rounded-full">
+                        {call.type === 'video' ? <Video size={24} /> : <Phone size={24} />}
+                    </div>
+                )}
+                <Avatar src={otherUser.avatarUrl || `https://picsum.photos/seed/${otherUser.uid}/100/100`} alt={otherUser.name} size="lg" gender={otherUser.gender}/>
                 <h2 className="text-3xl font-bold mt-6 text-shadow">{otherUser.name}</h2>
                 <p className="text-lg text-white/80 mt-2 text-shadow">{getStatusText()}</p>
             </div>
             
-            {localStream && (
+            {localStream && call.type === 'video' && (
                 <motion.div drag dragMomentum={false} className={`absolute top-4 right-4 w-28 h-40 bg-black rounded-lg overflow-hidden shadow-lg cursor-grab active:cursor-grabbing transition-opacity duration-500 ${call.status === 'connected' ? 'opacity-100' : 'opacity-0'}`}>
                     <video ref={localVideoRef} autoPlay muted playsInline className={localVideoClasses}/>
                     {isCameraOff && <div className="w-full h-full flex items-center justify-center bg-gray-800"><VideoOff size={32} className="text-white"/></div>}

@@ -17,7 +17,7 @@ interface ChatBubbleProps {
   isSelected: boolean;
   userCache: { [uid: string]: User };
   id: string;
-  translation?: { text: string; isLoading: boolean };
+  isTranslating: boolean;
 }
 
 const ReactionTooltip: React.FC<{ uids: string[], userCache: { [uid: string]: User } }> = ({ uids, userCache }) => {
@@ -44,7 +44,7 @@ const linkify = (text: string) => {
 };
 
 
-const ChatBubble: React.FC<ChatBubbleProps> = ({ message, currentUser, otherParticipant, onContextMenu, onAddReaction, onReply, onMediaClick, userCache, id, selectionMode, isSelected, onToggleSelection, translation }) => {
+const ChatBubble: React.FC<ChatBubbleProps> = ({ message, currentUser, otherParticipant, onContextMenu, onAddReaction, onReply, onMediaClick, userCache, id, selectionMode, isSelected, onToggleSelection, isTranslating }) => {
   const isSent = message.senderId === currentUser.uid;
   const [visibleTooltip, setVisibleTooltip] = useState<string | null>(null);
   const tooltipTimeoutRef = useRef<number | null>(null);
@@ -144,7 +144,22 @@ const ChatBubble: React.FC<ChatBubbleProps> = ({ message, currentUser, otherPart
         case 'audio':
              return <audio controls src={message.mediaUrl} className="w-full max-w-[250px] h-10" />;
         default:
-            return <p className="text-base whitespace-pre-wrap break-words">{linkify(message.text)}</p>;
+            return (
+              <>
+                <p className="text-base whitespace-pre-wrap break-words">{linkify(message.text)}</p>
+                {isTranslating && (
+                    <div className="flex items-center gap-2 mt-2 opacity-70">
+                        <Loader2 size={14} className="animate-spin" />
+                        <span className="text-xs font-semibold">Translating...</span>
+                    </div>
+                )}
+                {message.translatedText && (
+                    <div className="mt-2 pt-2 border-t border-white/20 dark:border-gray-500/50">
+                        <p className="text-base whitespace-pre-wrap break-words">{message.translatedText}</p>
+                    </div>
+                )}
+              </>
+            );
     }
   };
 
@@ -185,18 +200,6 @@ const ChatBubble: React.FC<ChatBubbleProps> = ({ message, currentUser, otherPart
                         
                         {renderMessageContent()}
                         
-                        {translation && (
-                          <div className={`mt-2 pt-2 ${isSent ? 'border-t-white/20' : 'border-t-black/10 dark:border-t-gray-600'} border-t`}>
-                            {translation.isLoading ? (
-                              <div className="flex items-center gap-2 text-sm italic opacity-70">
-                                <Loader2 size={14} className="animate-spin" />
-                                <span>Translating...</span>
-                              </div>
-                            ) : (
-                               <p className="text-sm italic opacity-90">{translation.text}</p>
-                            )}
-                          </div>
-                        )}
                     </div>
                     
                     {reactionEntries.length > 0 && (

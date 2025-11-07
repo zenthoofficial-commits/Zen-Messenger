@@ -12,11 +12,13 @@ interface AccountSettingsScreenProps {
 const AccountSettingsScreen: React.FC<AccountSettingsScreenProps> = ({ currentUser, onBack }) => {
   const [name, setName] = useState(currentUser.name);
   const [birthday, setBirthday] = useState(currentUser.birthday);
+  const [gender, setGender] = useState(currentUser.gender);
   const [relationshipStatus, setRelationshipStatus] = useState(currentUser.relationshipStatus);
   const [error, setError] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [success, setSuccess] = useState(false);
 
+  const GENDER_OPTIONS = ['Male', 'Female', 'Non-binary'];
   const RELATIONSHIP_OPTIONS = ['Single', 'In a relationship'];
 
   const handleSaveChanges = async () => {
@@ -40,6 +42,7 @@ const AccountSettingsScreen: React.FC<AccountSettingsScreenProps> = ({ currentUs
         name: name.trim(),
         name_lowercase: name.trim().toLowerCase(),
         birthday,
+        gender,
         relationshipStatus,
       });
       setSuccess(true);
@@ -80,6 +83,10 @@ const AccountSettingsScreen: React.FC<AccountSettingsScreenProps> = ({ currentUs
               onChange={(e) => setBirthday(e.target.value)}
               className="w-full mt-1 p-3 bg-secondary-cream dark:bg-gray-800 rounded-xl outline-none focus:ring-2 focus:ring-accent-brand transition-shadow text-text-primary dark:text-gray-100"
             />
+          </div>
+          <div>
+            <label className="text-sm font-medium text-text-primary/80 dark:text-gray-300 mb-1 block">Gender</label>
+            <SegmentedControl name="gender" options={GENDER_OPTIONS} selectedValue={gender} onChange={setGender} />
           </div>
           <div>
             <label className="text-sm font-medium text-text-primary/80 dark:text-gray-300 mb-1 block">Relationship Status</label>

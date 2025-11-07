@@ -321,6 +321,9 @@ const App: React.FC = () => {
   };
 
   const handleSelectChat = (chat: ChatWithDetails) => {
+    if (currentUser) {
+        db.ref(`chats/${chat.id}/unreadCount/${currentUser.uid}`).set(0);
+    }
     setActiveChat(chat);
     navigateTo('chat');
   };
@@ -392,6 +395,16 @@ const App: React.FC = () => {
                 link: { screen: 'chat', chatId: newChatId }
             };
             await db.ref(`userNotifications/${currentUser.uid}`).push().set(notifForCurrentUser);
+            
+            const notifForOtherUser = {
+                type: 'new_contact',
+                title: 'New Friend!',
+                body: `${currentUser.name} has connected with you. Say hi!`,
+                timestamp: firebase.database.ServerValue.TIMESTAMP,
+                isRead: false,
+                link: { screen: 'chat', chatId: newChatId }
+            };
+            await db.ref(`userNotifications/${user.uid}`).push().set(notifForOtherUser);
 
             chatToNavigateTo = {
                 id: newChatId,
@@ -424,17 +437,22 @@ const App: React.FC = () => {
             callerId: currentUser.uid,
             callerName: currentUser.name,
             callerAvatar: currentUser.avatarUrl || '',
+            callerGender: currentUser.gender,
             calleeId: userToCall.uid,
             calleeName: userToCall.name,
             calleeAvatar: userToCall.avatarUrl || '',
+            calleeGender: userToCall.gender,
             type,
             status: 'ringing',
             createdAt: firebase.database.ServerValue.TIMESTAMP as number,
             chatId: chatId,
         };
         
+        // Step 1: Create the call object first to comply with security rules.
+        await callDocRef.set(newCallData);
+        
+        // Step 2: Add the call to both users' call lists.
         const updates: { [key: string]: any } = {};
-        updates[`/calls/${callId}`] = newCallData;
         updates[`/userCalls/${currentUser.uid}/${callId}`] = true;
         updates[`/userCalls/${userToCall.uid}/${callId}`] = true;
         
@@ -546,7 +564,7 @@ const App: React.FC = () => {
 
   const renderActiveScreen = () => {
     // These screens are mounted and unmounted as needed.
-    // HomeScreen is handled separately to preserve its state.
+    // HomeScreen and ChatScreen are handled separately to preserve state.
     if (!currentUser && screen !== 'profile_creation') return <SplashScreen />;
     
     switch (screen) {
@@ -557,16 +575,7 @@ const App: React.FC = () => {
       case 'home':
         return null; // Handled by the persistent component
       case 'chat':
-        return activeChat ? <ChatScreen 
-                  chat={activeChat} 
-                  onBack={() => { setActiveChat(null); navigateTo('home'); }} 
-                  currentUser={currentUser!}
-                  onStartCall={(type, user) => handleStartCall(type, user, activeChat.id)}
-                  onViewProfile={handleViewProfile}
-                  userCache={userCache}
-                  setUserCache={setUserCache}
-                  chatBackgroundImageUrl={currentUser?.chatBackgroundImageUrl}
-                /> : <SplashScreen />;
+        return null; // Handled by the persistent component
       case 'profile':
         return <ProfileScreen 
                   currentUser={currentUser!} 
@@ -622,7 +631,22 @@ const App: React.FC = () => {
             )}
         </div>
         
-        {screen !== 'home' && renderActiveScreen()}
+        <div style={{ display: screen === 'chat' ? 'block' : 'none' }} className="w-full h-full">
+            {currentUser && activeChat && (
+                <ChatScreen 
+                  chat={activeChat} 
+                  onBack={() => navigateTo('home')} 
+                  currentUser={currentUser}
+                  onStartCall={(type, user) => handleStartCall(type, user, activeChat.id)}
+                  onViewProfile={handleViewProfile}
+                  userCache={userCache}
+                  setUserCache={setUserCache}
+                  chatBackgroundImageUrl={currentUser?.chatBackgroundImageUrl}
+                />
+            )}
+        </div>
+        
+        {screen !== 'home' && screen !== 'chat' && renderActiveScreen()}
         
         {isSearchVisible && currentUser && (
           <SearchUserModal 

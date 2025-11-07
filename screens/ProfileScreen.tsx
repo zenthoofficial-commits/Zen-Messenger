@@ -94,7 +94,7 @@ const ProfileScreen: React.FC<ProfileScreenProps> = ({ currentUser, onBack, onLo
       <main className="flex-1 overflow-y-auto scrollbar-hide p-4">
         <div className="p-6 bg-accent-brand/10 dark:bg-accent-brand/20 flex flex-col items-center rounded-2xl mb-4">
             <button className="relative group rounded-full" onClick={handleAvatarClick} disabled={isUploading}>
-              <Avatar src={currentUser.avatarUrl || `https://picsum.photos/seed/${currentUser.uid}/100/100`} alt={currentUser.name} size="lg" />
+              <Avatar src={currentUser.avatarUrl || `https://picsum.photos/seed/${currentUser.uid}/100/100`} alt={currentUser.name} size="lg" gender={currentUser.gender}/>
               <div className="absolute inset-0 rounded-full bg-black/50 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer">
                   {isUploading ? <Loader2 size={32} className="text-white animate-spin"/> : <Camera size={32} className="text-white"/>}
               </div>
@@ -147,7 +147,7 @@ const ProfileScreen: React.FC<ProfileScreenProps> = ({ currentUser, onBack, onLo
             <LogOut size={20} />
             <span>Logout</span>
         </button>
-        <p className="text-sm text-text-primary/50 dark:text-gray-500">ZenChat v1.9.0</p>
+        <p className="text-sm text-text-primary/50 dark:text-gray-500">ZenChat v1.5.0</p>
         <p className="text-xs text-text-primary/40 dark:text-gray-600">Secure. Serene. Seamless.</p>
       </div>
     </div>

@@ -54,6 +54,7 @@ export interface Message {
   mediaUrl?: string;
   deletedFor?: { [uid: string]: boolean }; // UIDs of users who have deleted this message for themselves
   isSystemMessage?: boolean;
+  translatedText?: string;
 }
 
 export interface Notification {
@@ -94,9 +95,11 @@ export interface Call {
   callerId: string;
   callerName: string;
   callerAvatar?: string;
+  callerGender?: string;
   calleeId: string;
   calleeName: string;
   calleeAvatar?: string;
+  calleeGender?: string;
   type: 'audio' | 'video';
   status: 'ringing' | 'connected' | 'ended' | 'declined' | 'missed';
   createdAt: Timestamp;

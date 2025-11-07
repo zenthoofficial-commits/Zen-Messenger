@@ -55,7 +55,7 @@ const UserProfileViewScreen: React.FC<UserProfileViewScreenProps> = ({ user, cur
       <main className="flex-1 flex flex-col items-center justify-center p-4">
         <div className="p-6 bg-secondary-cream dark:bg-gray-800 flex flex-col items-center rounded-2xl shadow-lg w-full max-w-sm">
             <button onClick={() => setIsViewerOpen(true)} className="rounded-full focus:outline-none focus:ring-4 focus:ring-accent-brand/50">
-              <Avatar src={user.avatarUrl || `https://picsum.photos/seed/${user.uid}/100/100`} alt={user.name} size="lg" />
+              <Avatar src={user.avatarUrl || `https://picsum.photos/seed/${user.uid}/100/100`} alt={user.name} size="lg" gender={user.gender}/>
             </button>
             <div className="flex items-center gap-2 mt-4">
                 <h2 className="text-2xl font-bold text-text-primary dark:text-gray-100">{displayName}</h2>

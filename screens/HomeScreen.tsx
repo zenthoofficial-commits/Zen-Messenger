@@ -275,7 +275,7 @@ const HomeScreen: React.FC<HomeScreenProps> = ({ onSelectChat, currentUser, onSe
                     )}
                 </button>
                 <button onClick={onProfileClick}>
-                    <Avatar src={currentUser.avatarUrl || `https://picsum.photos/seed/${currentUser.uid}/100/100`} alt={currentUser.name} size="sm"/>
+                    <Avatar src={currentUser.avatarUrl || `https://picsum.photos/seed/${currentUser.uid}/100/100`} alt={currentUser.name} size="sm" gender={currentUser.gender}/>
                 </button>
                 </div>
             </>
@@ -291,6 +291,7 @@ const HomeScreen: React.FC<HomeScreenProps> = ({ onSelectChat, currentUser, onSe
                     onContextMenu={handleContextMenu}
                     isPinned={!!(chat.pinnedBy && chat.pinnedBy[currentUser.uid])}
                     nickname={currentUser.nicknames?.[chat.otherParticipant.uid]}
+                    gender={chat.otherParticipant.gender}
                 />
             ))
         ) : (

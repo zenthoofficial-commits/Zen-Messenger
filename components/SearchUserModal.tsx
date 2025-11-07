@@ -124,7 +124,7 @@ const SearchUserModal: React.FC<SearchUserModalProps> = ({ currentUser, onClose,
                     return (
                         <div key={user.uid} className="flex items-center justify-between p-2 rounded-lg hover:bg-base-tan/50 dark:hover:bg-gray-700/50">
                             <div className="flex items-center gap-3">
-                                <Avatar src={user.avatarUrl || `https://picsum.photos/seed/${user.uid}/100/100`} alt={user.name} size="sm" />
+                                <Avatar src={user.avatarUrl || `https://picsum.photos/seed/${user.uid}/100/100`} alt={user.name} size="sm" gender={user.gender}/>
                                 <div>
                                     <span className="font-semibold text-text-primary dark:text-gray-200">{user.name}</span>
                                     {isFriend && (

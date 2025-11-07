@@ -82,15 +82,16 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ chat, onBack, currentUser, onSt
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedMessages, setSelectedMessages] = useState<string[]>([]);
   const [uploadState, setUploadState] = useState<{ progress: number; fileName: string; } | null>(null);
-  const [translatedMessages, setTranslatedMessages] = useState<Record<string, {text: string, isLoading: boolean}>>({});
   const [isPermissionModalOpen, setIsPermissionModalOpen] = useState(false);
   const [permissionError, setPermissionError] = useState<{name: 'geolocation', feature: string} | null>(null);
+  const [translatingMessageId, setTranslatingMessageId] = useState<string | null>(null);
 
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const chatMessagesRef = db.ref(`messages/${chat.id}`);
   const chatRef = db.ref(`chats/${chat.id}`);
+  const prevMessagesRef = useRef<Message[]>();
   
   useEffect(() => {
     const userRef = db.ref(`users/${chat.otherParticipant.uid}`);
@@ -108,46 +109,43 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ chat, onBack, currentUser, onSt
     }
   }, [messages.length, isChatSearchVisible, selectionMode]);
   
-  // Messages listener - Optimized for performance
   useEffect(() => {
     const q = chatMessagesRef.orderByChild('timestamp');
 
-    const handleChildAdded = (snapshot: firebase.database.DataSnapshot) => {
-        const newMessage = { id: snapshot.key, ...snapshot.val() } as Message;
-        if (!newMessage.deletedFor?.[currentUser.uid]) {
-            setMessages(prev => {
-                if (prev.some(m => m.id === newMessage.id)) return prev;
-                return [...prev, newMessage];
+    const listener = q.on('value', (snapshot) => {
+        const loadedMessages: Message[] = [];
+        if(snapshot.exists()) {
+            snapshot.forEach(childSnapshot => {
+                const msg = { id: childSnapshot.key, ...childSnapshot.val() } as Message;
+                if (!msg.deletedFor?.[currentUser.uid]) {
+                    loadedMessages.push(msg);
+                }
             });
-            if (newMessage.senderId !== currentUser.uid && newMessage.timestamp > Date.now() - 5000) {
-                 playSound('incoming');
-            }
         }
-    };
-
-    const handleChildChanged = (snapshot: firebase.database.DataSnapshot) => {
-        const changedMessage = { id: snapshot.key, ...snapshot.val() } as Message;
-        if (changedMessage.deletedFor?.[currentUser.uid]) {
-            setMessages(prev => prev.filter(m => m.id !== changedMessage.id));
-        } else {
-            setMessages(prev => prev.map(m => m.id === changedMessage.id ? changedMessage : m));
-        }
-    };
-    
-    const handleChildRemoved = (snapshot: firebase.database.DataSnapshot) => {
-        setMessages(prev => prev.filter(m => m.id !== snapshot.key));
-    };
-
-    q.on('child_added', handleChildAdded);
-    q.on('child_changed', handleChildChanged);
-    q.on('child_removed', handleChildRemoved);
+        setMessages(prev => {
+            // Preserve existing translatedText on new messages load
+            return loadedMessages.map(newMsg => {
+                const existingMsg = prev.find(p => p.id === newMsg.id);
+                return existingMsg?.translatedText ? { ...newMsg, translatedText: existingMsg.translatedText } : newMsg;
+            });
+        });
+    });
 
     return () => {
-        q.off('child_added', handleChildAdded);
-        q.off('child_changed', handleChildChanged);
-        q.off('child_removed', handleChildRemoved);
+        q.off('value', listener);
     };
   }, [chat.id, currentUser.uid]);
+
+  useEffect(() => {
+    if (prevMessagesRef.current && prevMessagesRef.current.length < messages.length) {
+        const lastMessage = messages[messages.length-1];
+        if (lastMessage.senderId !== currentUser.uid && lastMessage.timestamp > Date.now() - 5000) {
+             playSound('incoming');
+        }
+    }
+    prevMessagesRef.current = messages;
+  }, [messages, currentUser.uid]);
+
 
   // Presence, Typing, and Pinned Message listener
   useEffect(() => {
@@ -189,11 +187,10 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ chat, onBack, currentUser, onSt
     };
   }, [chat.id, realtimeOtherParticipant.uid, pinnedMessage?.id, currentUser.uid]);
 
-  // Reset unread count and mark messages as read
+  // Mark messages as read
   useEffect(() => {
     const markMessagesAsRead = () => {
-        if (messages.length > 0 && document.visibilityState === 'visible') {
-            chatRef.child(`unreadCount/${currentUser.uid}`).set(0).catch(e => console.error("Error resetting unread count", e));
+        if (document.visibilityState === 'visible') {
             const updates: { [key: string]: boolean } = {};
             messages.forEach(msg => {
                 if (msg.senderId === realtimeOtherParticipant.uid && (!msg.readBy || !msg.readBy[currentUser.uid])) {
@@ -235,10 +232,11 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ chat, onBack, currentUser, onSt
         
         const finalMessage = { ...newMessageData, id: newMessageRef.key! } as Message;
 
-        await chatRef.update({
+        const updates = {
             lastMessage: finalMessage,
-        });
-        await chatRef.child(`unreadCount/${realtimeOtherParticipant.uid}`).set(firebase.database.ServerValue.increment(1));
+            [`unreadCount/${realtimeOtherParticipant.uid}`]: firebase.database.ServerValue.increment(1)
+        };
+        await chatRef.update(updates);
 
         playSound('outgoing');
     } catch (error) {
@@ -293,10 +291,11 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ chat, onBack, currentUser, onSt
             
             const finalMessage = { ...newMessageData, id: messageRef.key! } as Message;
 
-             await chatRef.update({
+            const updates = {
                 lastMessage: finalMessage,
-            });
-            await chatRef.child(`unreadCount/${realtimeOtherParticipant.uid}`).set(firebase.database.ServerValue.increment(1));
+                [`unreadCount/${realtimeOtherParticipant.uid}`]: firebase.database.ServerValue.increment(1)
+            };
+            await chatRef.update(updates);
             playSound('outgoing');
         } catch (error) {
             console.error("Error saving media message to RTDB:", error);
@@ -344,10 +343,11 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ chat, onBack, currentUser, onSt
             
             const finalMessage = { ...newMessageData, id: messageRef.key! } as Message;
 
-            await chatRef.update({
+            const updates = {
                 lastMessage: finalMessage,
-            });
-            await chatRef.child(`unreadCount/${realtimeOtherParticipant.uid}`).set(firebase.database.ServerValue.increment(1));
+                [`unreadCount/${realtimeOtherParticipant.uid}`]: firebase.database.ServerValue.increment(1)
+            };
+            await chatRef.update(updates);
             playSound('outgoing');
         } catch (error) {
             console.error("Error saving audio message to RTDB:", error);
@@ -498,6 +498,21 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ chat, onBack, currentUser, onSt
     }).catch(e => console.error("RTDB Error: Failed to update reaction.", e));
   };
 
+  const handleTranslateMessage = async (messageToTranslate: Message) => {
+      setTranslatingMessageId(messageToTranslate.id);
+      try {
+        const translation = await translateText(messageToTranslate.text);
+        setMessages(prevMessages => prevMessages.map(msg => 
+          msg.id === messageToTranslate.id ? { ...msg, translatedText: translation } : msg
+        ));
+      } catch (error) {
+        console.error("Translation failed", error);
+        alert("Could not translate message.");
+      } finally {
+        setTranslatingMessageId(null);
+      }
+    };
+
   const handleReportUser = () => {
     setHeaderMenuOpen(false);
     const displayName = currentUser.nicknames?.[realtimeOtherParticipant.uid] || realtimeOtherParticipant.name;
@@ -566,21 +581,9 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ chat, onBack, currentUser, onSt
     setHeaderMenuOpen(!headerMenuOpen);
   };
 
-  const handleTranslateMessage = async (message: Message) => {
-    if (translatedMessages[message.id]?.text || message.mediaType) return;
-    setTranslatedMessages(prev => ({ ...prev, [message.id]: { text: '', isLoading: true } }));
-    try {
-        const translation = await translateText(message.text, "Burmese");
-        setTranslatedMessages(prev => ({ ...prev, [message.id]: { text: translation, isLoading: false } }));
-    } catch (error) {
-        setTranslatedMessages(prev => ({ ...prev, [message.id]: { text: "Translation failed.", isLoading: false } }));
-    }
-  };
-
-
   const contextMenuOptions = useMemo(() => contextMenuMessage ? [
+        contextMenuMessage.senderId !== currentUser.uid && !contextMenuMessage.mediaType && { label: 'Translate', icon: Languages, onClick: () => handleTranslateMessage(contextMenuMessage) },
         contextMenuMessage.mediaType !== 'audio' && { label: 'Copy', icon: Copy, onClick: () => navigator.clipboard.writeText(contextMenuMessage.text) },
-        !contextMenuMessage.mediaType && { label: 'Translate', icon: Languages, onClick: () => handleTranslateMessage(contextMenuMessage) },
         contextMenuMessage.senderId === currentUser.uid && !contextMenuMessage.mediaType && { label: 'Edit', icon: Edit, onClick: () => { setEditingMessage(contextMenuMessage); setEditText(contextMenuMessage.text); }},
         { label: pinnedMessage?.id === contextMenuMessage.id ? 'Unpin' : 'Pin', icon: Pin, onClick: () => handleTogglePin(contextMenuMessage) },
         { label: 'Delete for me', icon: Trash, onClick: () => handleDeleteMessage(contextMenuMessage), isDestructive: true },
@@ -638,7 +641,7 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ chat, onBack, currentUser, onSt
       <header className="p-3 flex items-center gap-3 bg-secondary-cream/80 dark:bg-gray-900/80 backdrop-blur-sm sticky top-0 z-20 shadow-sm">
         <button onClick={onBack} className="text-text-primary/80 dark:text-gray-300 hover:text-text-primary dark:hover:text-white"><ArrowLeft size={24} /></button>
         <button onClick={onViewProfile} className="flex items-center gap-3 flex-1">
-            <Avatar src={realtimeOtherParticipant.avatarUrl || `https://picsum.photos/seed/${realtimeOtherParticipant.uid}/100/100`} alt={displayName} isOnline={otherUserPresence?.isOnline} size="sm" />
+            <Avatar src={realtimeOtherParticipant.avatarUrl || `https://picsum.photos/seed/${realtimeOtherParticipant.uid}/100/100`} alt={displayName} isOnline={otherUserPresence?.isOnline} size="sm" gender={realtimeOtherParticipant.gender}/>
             <div className="flex-1 text-left">
               <h2 className="font-bold text-lg text-text-primary dark:text-gray-100">{displayName}</h2>
               <p className={`text-sm font-semibold ${statusColor}`}>{statusText}</p>
@@ -705,22 +708,24 @@ const ChatScreen: React.FC<ChatScreenProps> = ({ chat, onBack, currentUser, onSt
             permissionName={permissionError?.name || 'microphone'}
             featureName={permissionError?.feature || 'this feature'}
         />
-        {filteredMessages.map(msg => (
-          <ChatBubble 
-            key={msg.id} message={msg} currentUser={currentUser} otherParticipant={realtimeOtherParticipant}
-            onContextMenu={handleContextMenu}
-            onAddReaction={handleAddReaction}
-            onReply={setReplyingTo}
-            onMediaClick={setViewingMedia}
-            onToggleSelection={handleToggleMessageSelection}
-            selectionMode={selectionMode}
-            isSelected={selectedMessages.includes(msg.id)}
-            userCache={userCache}
-            id={`msg-${msg.id}`}
-            translation={translatedMessages[msg.id]}
-          />
-        ))}
-        <div ref={messagesEndRef} />
+        <>
+            {filteredMessages.map(msg => (
+            <ChatBubble 
+                key={msg.id} message={msg} currentUser={currentUser} otherParticipant={realtimeOtherParticipant}
+                onContextMenu={handleContextMenu}
+                onAddReaction={handleAddReaction}
+                onReply={setReplyingTo}
+                onMediaClick={setViewingMedia}
+                onToggleSelection={handleToggleMessageSelection}
+                selectionMode={selectionMode}
+                isSelected={selectedMessages.includes(msg.id)}
+                userCache={userCache}
+                id={`msg-${msg.id}`}
+                isTranslating={translatingMessageId === msg.id}
+            />
+            ))}
+            <div ref={messagesEndRef} />
+        </>
       </main>
 
       {viewingMedia && <MediaViewer message={viewingMedia} onClose={() => setViewingMedia(null)} />}
